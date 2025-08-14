@@ -158,9 +158,7 @@ class RequestTracker:
         """Process a request output from the engine."""
         request_id = request_output.request_id
         finished = request_output.finished
-        if finished:
-            # arif
-            logger.info(f"async_llm:|:finish:|:{time.time()}:|:{request_id}")
+
         if finished:
             stream = self._request_streams.pop(request_id, None)
         else:
@@ -201,8 +199,7 @@ class RequestTracker:
             "request_id": request_id,
             **engine_add_request_kwargs
         }))
-        # arif
-        logger.info(f"async_llm:|:add:|:{time.time()}:|:{request_id}")
+
         self.new_requests_event.set()
 
         if verbose:

@@ -264,6 +264,7 @@ class EncoderScheduler(SchedulerInterface):
 
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
+        self.debug_logs.append(f"encoder:|:added:|:{time.time()}:|:{request.request_id}")
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)

@@ -240,6 +240,8 @@ class AsyncLLM(EngineClient):
 
         if self.errored:
             raise EngineDeadError()
+        # arif
+        logger.info(f"async_llm:|:add:|:{time.time()}:|:{request_id}")
 
         is_pooling = isinstance(params, PoolingParams)
 
