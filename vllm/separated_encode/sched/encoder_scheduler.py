@@ -104,6 +104,10 @@ class EncoderScheduler(SchedulerInterface):
         )
         self._allocated: dict[tuple[str, int], int] = {}
 
+        # debug
+        self.total_finished_request = 0
+        self.debug_logs = []
+
     def schedule(self) -> SchedulerOutput:
         scheduled_new_reqs: list[Request] = []
 
@@ -115,7 +119,6 @@ class EncoderScheduler(SchedulerInterface):
         
         # For logging.
         scheduled_timestamp = time.monotonic()
-
 
         while self.waiting and token_budget > 0:
             if len(self.running) == self.max_num_running_reqs:
@@ -157,6 +160,7 @@ class EncoderScheduler(SchedulerInterface):
                 request.record_event(EngineCoreEventType.SCHEDULED,
                                         scheduled_timestamp)
             if request.status == RequestStatus.WAITING:
+                self.debug_logs.append(f"encoder:|:scheduled:|:{time.time()}:|:{request.request_id}")
                 scheduled_new_reqs.append(request)
             else:
                 raise RuntimeError(
@@ -176,9 +180,7 @@ class EncoderScheduler(SchedulerInterface):
                 )
                 self._allocated[(request.request_id, i)] = request.get_num_encoder_tokens(i)
             encoder_budget = new_encoder_budget
-
-
-
+        self.debug_logs.append(f"encoder:|:tot_start:|:{time.time()}:|:{len(self.running)}")
         assert len(self.running) <= self.max_num_running_reqs
 
         new_reqs_data = [
@@ -217,11 +219,15 @@ class EncoderScheduler(SchedulerInterface):
             self.encoder_cache_manager.deallocate(req_id, input_id, cache_size)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        self.total_finished_request += len(self.running)
+        self.debug_logs.append(f"encoder:|:tot_finish:|:{time.time()}:|:{self.total_finished_request}")
+        
 
         model_finished = []
         for request in self.running:
             req_id = request.request_id
             model_finished.append(req_id)
+            self.debug_logs.append(f"encoder:|:finished:|:{time.time()}:|:{request.request_id}")
             outputs[request.client_index].append(
                 EngineCoreOutput(request_id=req_id,
                     new_token_ids=[],
@@ -244,7 +250,16 @@ class EncoderScheduler(SchedulerInterface):
             # Return stats to only one of the front-ends.
             next(iter(engine_core_outputs.values())).scheduler_stats = (
                 self.make_stats(None))
-
+        if self.total_finished_request == 1000:
+            import os
+            from datetime import datetime
+            log_path = os.path.join(
+                os.getenv("LOG_PATH"), 
+                f"encode_debug_{ datetime.now().strftime("%m_%d_%H_%M")}.txt"
+            )
+            with open(log_path, "w") as file:
+                for info in self.debug_logs:
+                    file.write(info + "\n")
         return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
