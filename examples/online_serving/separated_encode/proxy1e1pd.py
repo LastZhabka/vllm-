@@ -5,8 +5,8 @@ import time
 import uuid
 from typing import AsyncIterator, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
+import aiohttp
 from fastapi.responses import StreamingResponse, JSONResponse
-import httpx
 from pydantic import BaseModel
 import uvicorn
 import argparse
@@ -24,28 +24,31 @@ PREFILL_DECODE_SERVER_URL = "http://localhost:19535"
 E_RANK = 0
 PD_RANK = 1
 
-POOL_LIMITS = httpx.Limits(
-    max_keepalive_connections=64,
-    max_connections=64,
-)
-
 # Create persistent clients
-encode_client: Optional[httpx.AsyncClient] = None
-decode_client: Optional[httpx.AsyncClient] = None
+encode_session: Optional[aiohttp.ClientSession] = None
+decode_session: Optional[aiohttp.ClientSession] = None
+rate_limiter = asyncio.Semaphore(1024) # 1 worker
 
 @app.on_event("startup")
 async def startup_event():
-    global encode_client, decode_client
-    encode_client = httpx.AsyncClient(limits=POOL_LIMITS, timeout=httpx.Timeout(100000.0))
-    decode_client = httpx.AsyncClient(limits= POOL_LIMITS,timeout=httpx.Timeout(100000.0))
+    global encode_session, decode_session
+    encode_connector = aiohttp.TCPConnector(
+        limit=64,
+        limit_per_host=64)
+    decode_connector = aiohttp.TCPConnector(
+        limit=64,
+        limit_per_host=64)
+    timeout = aiohttp.ClientTimeout(total=100000)
+    encode_session = aiohttp.ClientSession(connector=encode_connector, timeout=timeout)
+    decode_session = aiohttp.ClientSession(connector=decode_connector, timeout=timeout)
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global encode_client, decode_client
-    if encode_client:
-        await encode_client.aclose()
-    if decode_client:
-        await decode_client.aclose()
+    global encode_session, decode_session
+    if encode_session:
+        await encode_session.close()
+    if decode_session:
+        await decode_session.close()
 
 class ChatCompletionRequest(BaseModel):
     model: str
@@ -65,32 +68,31 @@ async def forward_streaming_request(
     request_data: dict,
     request_id: str
 ) -> AsyncIterator[str]:
-    """Forward a streaming request to both servers and return the stream from server2."""
-    headers = {"x-request-id": request_id}
-    task1 = asyncio.create_task(
-        encode_client.post(
-            f"{ENCODE_SERVER_URL}/v1/chat/completions",
-            json=request_data,
-            headers=headers,
-            timeout=httpx.Timeout(100000)
+    with rate_limiter:
+        """Forward a streaming request to both servers and return the stream from server2."""
+        headers = {"x-request-id": request_id}
+        task1 = asyncio.create_task(
+            encode_session.post(
+                f"{ENCODE_SERVER_URL}/v1/chat/completions",
+                json=request_data,
+                headers=headers
+            )
         )
-    )
-    await task1
-    try:
-        async with decode_client.stream(
-            "POST",
-            f"{PREFILL_DECODE_SERVER_URL}/v1/chat/completions",
-            json=request_data,
-            timeout=httpx.Timeout(100000.0),
-            headers=headers
-        ) as response:
-            response.raise_for_status()
-            async for chunk in response.aiter_text():
-                yield chunk
-    except Exception as e:
-        logger.error(f"Error in streaming: {e}")
-        task1.cancel()
-        raise
+        await task1
+        try:
+            async with decode_session.post(
+                f"{PREFILL_DECODE_SERVER_URL}/v1/chat/completions",
+                json=request_data,
+                headers=headers
+            ) as response:
+                response.raise_for_status()
+                async for chunk in response.content.iter_chunked(128):
+                    if chunk:
+                        yield chunk.decode('utf-8', errors='ignore')
+        except Exception as e:
+            logger.error(f"Error in streaming: {e}")
+            task1.cancel()
+            raise
 
 async def forward_non_streaming_request(
     request_data: dict,
@@ -99,33 +101,25 @@ async def forward_non_streaming_request(
     """Forward a non-streaming request to both servers and return response from server2."""
     headers = {"x-request-id": request_id}
     
-    # Start request to server1
+    # Start request to encode server
     task1 = asyncio.create_task(
-        encode_client.post(
+        encode_session.post(
             f"{ENCODE_SERVER_URL}/v1/chat/completions",
             json=request_data,
             headers=headers
         )
     )
-    
+    await task1
     try:
-        # Make request to server2
-        response2 = await decode_client.post(
+        # Make request to decode server
+        async with decode_session.post(
             f"{PREFILL_DECODE_SERVER_URL}/v1/chat/completions",
             json=request_data,
             headers=headers
-        )
-        response2.raise_for_status()
-        
-        # Wait for server1 to complete
-        try:
-            response1 = await task1
-            response1.raise_for_status()
-        except Exception as e:
-            logger.error(f"Error in server1 request: {e}")
-        
-        return response2.json()
-        
+        ) as response2:
+            response2.raise_for_status()
+            result = await response2.json()
+        return result
     except Exception as e:
         logger.error(f"Error in non-streaming: {e}")
         task1.cancel()
@@ -164,104 +158,13 @@ async def chat_completions(request: Request):
         logger.error(f"Error processing request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/v1/completions")
-async def completions(request: Request):
-    """Handle completion requests (non-chat)."""
-    try:
-        # Parse request data
-        request_data = await request.json()
-        
-        # Generate request ID if not provided
-        request_id = request.headers.get("x-request-id")
-        if not request_id:
-            request_id = str(uuid.uuid4())
-        
-        # Add rank information to request ID
-        request_id = f"{request_id}|{E_RANK}|{PD_RANK}"
-        
-        # Check if streaming is requested
-        is_streaming = request_data.get("stream", False)
-        
-        headers = {"x-request-id": request_id}
-        
-        if is_streaming:
-            # Start request to server1
-            task1 = asyncio.create_task(
-                encode_client.post(
-                    f"{ENCODE_SERVER_URL}/v1/completions",
-                    json=request_data,
-                    headers=headers
-                )
-            )
-            # await task1
-            
-            # Stream from server2
-            async def stream_completions():
-                try:
-                    async with decode_client.stream(
-                        "POST",
-                        f"{PREFILL_DECODE_SERVER_URL}/v1/completions",
-                        json=request_data,
-                        headers=headers
-                    ) as response:
-                        response.raise_for_status()
-                        async for chunk in response.aiter_text():
-                            yield chunk
-                    
-                    # Wait for server1
-                    try:
-                        response1 = await task1
-                        response1.raise_for_status()
-                    except Exception as e:
-                        logger.error(f"Error in server1 request: {e}")
-                except Exception as e:
-                    task1.cancel()
-                    raise
-            
-            return StreamingResponse(
-                stream_completions(),
-                media_type="text/event-stream"
-            )
-        else:
-            # Non-streaming request
-            task1 = asyncio.create_task(
-                encode_client.post(
-                    f"{ENCODE_SERVER_URL}/v1/completions",
-                    json=request_data,
-                    headers=headers
-                )
-            )
-            
-            try:
-                response2 = await decode_client.post(
-                    f"{PREFILL_DECODE_SERVER_URL}/v1/completions",
-                    json=request_data,
-                    headers=headers
-                )
-                response2.raise_for_status()
-                
-                try:
-                    response1 = await task1
-                    response1.raise_for_status()
-                except Exception as e:
-                    logger.error(f"Error in server1 request: {e}")
-                
-                return JSONResponse(content=response2.json())
-            except Exception as e:
-                task1.cancel()
-                raise
-                
-    except Exception as e:
-        logger.error(f"Error processing request: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/v1/models")
 async def list_models():
     """List available models."""
     try:
-        response = await decode_client.get(f"{PREFILL_DECODE_SERVER_URL}/v1/models")
-        response.raise_for_status()
-        return response.json()
+        async with decode_session.get(f"{PREFILL_DECODE_SERVER_URL}/v1/models") as response:
+            response.raise_for_status()
+            return await response.json()
     except Exception as e:
         logger.error(f"Error fetching models: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -271,19 +174,33 @@ async def health_check():
     """Health check endpoint."""
     try:
         # Check both servers
-        tasks = [
-            encode_client.get(f"{ENCODE_SERVER_URL}/health"),
-            decode_client.get(f"{PREFILL_DECODE_SERVER_URL}/health")
-        ]
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        async def check_encode():
+            try:
+                async with encode_session.get(f"{ENCODE_SERVER_URL}/health") as response:
+                    response.raise_for_status()
+                    return True
+            except Exception:
+                return False
+        
+        async def check_decode():
+            try:
+                async with decode_session.get(f"{PREFILL_DECODE_SERVER_URL}/health") as response:
+                    response.raise_for_status()
+                    return True
+            except Exception:
+                return False
+        
+        encode_healthy, decode_healthy = await asyncio.gather(
+            check_encode(), check_decode(), return_exceptions=True
+        )
         
         health_status = {
             "proxy": "healthy",
-            "encode_server": "healthy" if not isinstance(responses[0], Exception) else "unhealthy",
-            "prefill_decode_server": "healthy" if not isinstance(responses[1], Exception) else "unhealthy"
+            "encode_server": "healthy" if encode_healthy is True else "unhealthy",
+            "prefill_decode_server": "healthy" if decode_healthy is True else "unhealthy"
         }
         
-        if any(isinstance(r, Exception) for r in responses):
+        if not (encode_healthy is True and decode_healthy is True):
             return JSONResponse(content=health_status, status_code=503)
         
         return health_status
@@ -294,7 +211,6 @@ async def health_check():
             content={"proxy": "unhealthy", "error": str(e)},
             status_code=503
         )
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="API Proxy for distributed vLLM servers")
