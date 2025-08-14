@@ -1058,12 +1058,12 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             request.status = finished_status
-            if self.separated_encode:
-                self.ec_preallocator.finish_request(request)
             self._free_request(request)
 
     def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
         assert request.is_finished()
+        if self.separated_encode:
+            self.ec_preallocator.finish_request(request)
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)

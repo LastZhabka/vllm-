@@ -9,7 +9,7 @@ wait_for_server() {
 }
 
 MODEL="/workspace/helper/Qwen2.5-VL-3B-Instruct" 
-LOG_PATH="/workspace/logs/benchmark/e_pd_1000"
+LOG_PATH=$LOG_PATH
 ENCODE_PORT=19534
 PREFILL_DECODE_PORT=19535
 PROXY_PORT=10001
@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES="$GPU" vllm serve "$MODEL" \
 wait_for_server $ENCODE_PORT
 
 CUDA_VISIBLE_DEVICES="$GPU" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.7 \
+    --gpu-memory-utilization 0.65 \
     --port "$PREFILL_DECODE_PORT" \
     --enable-request-id-headers \
     --max-num-seqs 128 \
@@ -46,7 +46,7 @@ python examples/online_serving/separated_encode/proxy1e1pd.py \
     --prefill-decode-server-url "http://localhost:$PREFILL_DECODE_PORT" \
     --e-rank 0 \
     --pd-rank 1 \
-    --workers 4 \
+    --workers 8 \
     2>&1 | tee $LOG_PATH/proxy_$START_TIME.log &
 
 wait_for_server $PROXY_PORT

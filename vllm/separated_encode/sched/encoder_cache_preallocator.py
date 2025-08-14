@@ -79,8 +79,10 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
 
     def finish_request(self, request: Request):
         with self.recv_lock:
-            self.waiting_preallocs.pop(request.request_id)
-            self.pending_preallocs.pop(request.request_id)
+            if request.request_id in self.waiting_preallocs:
+                self.waiting_preallocs.pop(request.request_id)
+            if request.request_id in self.pending_preallocs:
+                self.pending_preallocs.pop(request.request_id)
             for _ in range(self.mm_inputs_total[request.request_id]):
                 # Clean ignored_preallocs later, currently we assume that
                 # all mm_inputs will come to the instance at some moment

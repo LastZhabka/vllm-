@@ -25,8 +25,8 @@ E_RANK = 0
 PD_RANK = 1
 
 POOL_LIMITS = httpx.Limits(
-    max_keepalive_connections=50,
-    max_connections=50,
+    max_keepalive_connections=64,
+    max_connections=64,
 )
 
 # Create persistent clients
