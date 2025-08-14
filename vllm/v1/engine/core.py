@@ -849,7 +849,6 @@ class EngineCoreProc(EngineCore):
                     if request_type == EngineCoreRequestType.ADD:
                         request = add_request_decoder.decode(data_frames)
                         request = self.preprocess_add_request(request)
-                        logger.info(f"core:|:received:|:{time.time()}:|:{request[0].request_id}")
                     else:
                         request = generic_decoder.decode(data_frames)
 

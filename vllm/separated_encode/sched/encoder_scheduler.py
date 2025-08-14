@@ -250,7 +250,7 @@ class EncoderScheduler(SchedulerInterface):
             # Return stats to only one of the front-ends.
             next(iter(engine_core_outputs.values())).scheduler_stats = (
                 self.make_stats(None))
-        if self.total_finished_request == 1000:
+        if self.total_finished_request == 1001:
             import os
             from datetime import datetime
             log_path = os.path.join(
