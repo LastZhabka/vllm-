@@ -23,20 +23,18 @@ CUDA_VISIBLE_DEVICES="$GPU" vllm serve "$MODEL" \
     --max-num-seqs 128 \
     --instance-type "encode" \
     --connector-workers-num 8 \
-    --epd-rank 0 \
-    2>&1 | tee $LOG_PATH/encode_$START_TIME.log &
+    --epd-rank 0 &
 
 wait_for_server $ENCODE_PORT
 
 CUDA_VISIBLE_DEVICES="$GPU" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.65 \
+    --gpu-memory-utilization 0.6 \
     --port "$PREFILL_DECODE_PORT" \
     --enable-request-id-headers \
     --max-num-seqs 128 \
     --instance-type "prefill+decode" \
     --connector-workers-num 8 \
-    --epd-rank 1 \
-    2>&1 | tee $LOG_PATH/prefill_decode_$START_TIME.log &
+    --epd-rank 1 &
 
 wait_for_server $PREFILL_DECODE_PORT
 
@@ -46,7 +44,6 @@ python examples/online_serving/separated_encode/proxy1e1pd.py \
     --prefill-decode-server-url "http://localhost:$PREFILL_DECODE_PORT" \
     --e-rank 0 \
     --pd-rank 1 \
-    --workers 8 \
-    2>&1 | tee $LOG_PATH/proxy_$START_TIME.log &
+    --workers 8 &
 
 wait_for_server $PROXY_PORT
