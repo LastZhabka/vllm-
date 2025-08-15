@@ -14,6 +14,7 @@ from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs  
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.sampling_params import SamplingParams
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          parse_chat_messages,
                                          apply_hf_chat_template,
@@ -51,7 +52,6 @@ async def format_prompt(messages):
     list_of_messages = [
         cast(list[ChatCompletionMessageParam], messages)
     ]
-
     tokenizer = await encode_engine.get_tokenizer(None)
     model_config = await encode_engine.get_model_config()
     resolved_content_format = resolve_chat_template_content_format(
@@ -99,17 +99,14 @@ async def forward_streaming_request(
     request_data: dict,
     request_id: str
 ) -> AsyncIterator[str]:
-
     messages = request_data.get("messages", [])
     # convert from dict to vLLM
     prompt = await format_prompt(messages)
-    sampling_params = SamplingParams(  
-        temperature=request_data.get("temperature", 0.0),  
-        top_p=request_data.get("top_p", 0.1),  
-        max_tokens=request_data.get("max_tokens", 512),  
-        stop=request_data.get("stop"),  
-        n=request_data.get("n", 1)  
-    )  
+    sampling_params = ChatCompletionRequest(**request_data).to_sampling_params(
+        max_tokens=128,
+        logits_processor_pattern=encode_engine.model_config.logits_processor_pattern,
+        default_sampling_params=encode_engine.model_config.get_diff_sampling_param(),
+    )
     async for _ in encode_engine.generate(
         request_id=request_id,  
         prompt=prompt,  
