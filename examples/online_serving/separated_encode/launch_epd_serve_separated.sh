@@ -14,24 +14,26 @@ LOG_PATH=$LOG_PATH
 ENCODE_PORT=19534
 PREFILL_DECODE_PORT=19535
 PROXY_PORT=10001
-GPU="7"
+GPU_E="6"
+GPU_PD="7"
+
 START_TIME=$(date +"%Y%m%d_%H%M%S")
 
 redis-server &
 
-CUDA_VISIBLE_DEVICES="$GPU" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.2 \
+CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
+    --gpu-memory-utilization 0.9 \
     --port "$ENCODE_PORT" \
     --enable-request-id-headers \
-    --max-num-seqs 32 \
+    --max-num-seqs 128 \
     --instance-type "encode" \
     --connector-workers-num 8 \
     --epd-rank 0 &
 
 wait_for_server $ENCODE_PORT
 
-CUDA_VISIBLE_DEVICES="$GPU" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.6 \
+CUDA_VISIBLE_DEVICES="$GPU_PD" vllm serve "$MODEL" \
+    --gpu-memory-utilization 0.9 \
     --port "$PREFILL_DECODE_PORT" \
     --enable-request-id-headers \
     --max-num-seqs 128 \

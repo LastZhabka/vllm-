@@ -188,7 +188,7 @@ class EncoderScheduler(SchedulerInterface):
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
-            scheduled_cached_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens={},
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},

@@ -50,7 +50,6 @@ async def main(args):
         },
         {"type": "text", "text": "What is shown in the image.?"},
     ]
-    # multiple
     bs = args.batch_size
     queries = [query for i in range(bs)]
 
@@ -72,7 +71,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="test")
     parser.add_argument(
-        "--model_path", type=str, default="/home/yx/models/Qwen/Qwen2.5-VL-3B-Instruct"
+        "--model_path", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct"
     )
     parser.add_argument("--image_path", type=str, default="./demo.jpeg")
     parser.add_argument("--batch_size", type=int, default=1)
