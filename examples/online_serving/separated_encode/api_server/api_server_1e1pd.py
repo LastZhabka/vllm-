@@ -67,7 +67,7 @@ class RequestFormatter:
 
     def format_prompt(messages: Dict) -> TokensPrompt:
         """convert prompt from dict to internal vllm"""
-        tokenizer = encode_engine.tokenizer
+        tokenizer = encode_engine.tokenizer.tokenizer
         model_config = encode_engine.model_config
         resolved_content_format = resolve_chat_template_content_format(
             None, None, "auto", tokenizer, model_config=model_config,)

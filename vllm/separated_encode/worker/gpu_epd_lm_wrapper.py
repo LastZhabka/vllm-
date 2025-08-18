@@ -51,11 +51,11 @@ class DisaggLModelGPURunnerWrapper(GPUModelRunner):
         self.injected_encoder_cache_ids: list[tuple[str, int]]
         self.instance_type: Literal["NoEPD", "prefill+decode", "prefill",
                                     "encode"]
+        self.epd_disagg_config = vllm_config.epd_disagg_config
 
         assert self.epd_disagg_config.instance_type != "NoEPD",\
             "Can't use LM instance without EPD disaggregation"
-
-        self.epd_disagg_config = vllm_config.epd_disagg_config
+        
         self.instance_type = vllm_config.epd_disagg_config.instance_type
         self.ec_connector = RedisECConnector(
             vllm_config=vllm_config,
