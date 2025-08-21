@@ -802,8 +802,6 @@ class Scheduler(SchedulerInterface):
                         req_id, input_id)
                 else:
                     self.encoder_cache_manager.depreallocate(req_id, input_id)
-                    # Temporary solution to get stable runnable version v
-                    self.encoder_cache_manager.freed.append((req_id, input_id))
             # Finalize allocations or get rid of them
             self._perform_preallocations()
 

@@ -173,36 +173,37 @@ class EncoderCacheManager:
     ########################################################################
     # Encode-Prefill-Decode Disaggregation Related Methods
     ########################################################################
-    def can_preallocate(self, encoder_cache_size: int) -> bool:
+    def can_preallocate(self, num_encoder_tokens: int) -> bool:
         """
         Checks if sufficient space exists for preallocation using only the 
         request's encoder cache size data.
 
         Args:
-            encoder_cache_size (int): The size of the encoder cache to be 
+            num_encoder_tokens (int): The size of the encoder cache to be 
                 used for preallocation.
 
         Returns:
             bool: True if there is enough space for preallocation, 
                 False otherwise.
         """
-        return encoder_cache_size <= self.num_free_slots
+        return num_encoder_tokens <= self.num_free_slots
 
     def preallocate(self, req_id: str, input_id: int, 
-                    encoder_cache_size: int) -> None:
+                    num_encoder_tokens: int) -> None:
         if req_id not in self.preallocated:
             self.preallocated[req_id] = {}
-        self.preallocated[req_id][input_id] = encoder_cache_size
-        self.num_free_slots -= encoder_cache_size
+        self.preallocated[req_id][input_id] = num_encoder_tokens
+        self.num_free_slots -= num_encoder_tokens
 
     def depreallocate(self, req_id: str, input_id: int) -> None:
         self.num_free_slots += self.preallocated[req_id][input_id]
         self.preallocated[req_id].pop(input_id)
+        self.freed.append((req_id, input_id))
         if not self.preallocated[req_id]:
             self.preallocated.pop(req_id)
 
-    def deallocate(self, req_id: str, input_id: int, encoder_cache_size: int):
-        self.num_free_slots += encoder_cache_size
+    def deallocate(self, req_id: str, input_id: int, num_encoder_tokens: int):
+        self.num_free_slots += num_encoder_tokens
         self.cached[req_id].discard(input_id)
         self.freed.append((req_id, input_id))
         if len(self.cached[req_id]) == 0:
