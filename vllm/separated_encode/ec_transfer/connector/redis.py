@@ -19,10 +19,10 @@ class RedisECConnector(ECConnectorTemplate):
     def __init__(self,
                  vllm_config: "VllmConfig",
                  intra_instance_type: Literal["scheduler", "model-runner"],
-                 preallocate_callback: Optional[Callable[[str, int, int],
+                 preallocate_callback: Optional[Callable[[str, int, int, str],
                                                          None]],
                  injection_callback: Optional[Callable[
-                     [str, int, NDArray[np.float32]], None]],
+                     [str, int, NDArray[np.float32], str], None]],
                  redis_host: str = "localhost",
                  redis_port: int = 6379):
         self.redis_client = redis.StrictRedis(host=redis_host, port=redis_port)
@@ -39,76 +39,89 @@ class RedisECConnector(ECConnectorTemplate):
         result = request_id.split("|")
         return int(result[1]), int(result[2])
 
-    def _send_prealloc_notification(self, request_id: str,
-                                    input_id: int, succesfull: bool) -> None:
+    def _send_prealloc_notification(self, request_id: str, input_id: int, 
+                                    successful: bool, mm_hash: str) -> None:
         # PD -> E
         transfer_data = {
             "request_id": request_id, 
             "input_id": input_id, 
-            "succesfull": succesfull
+            "successful": successful,
+            "mm_hash": mm_hash
         }
         rank = self._get_request_ranks(request_id)[0]
-        logger.debug(f"Sent prealloc notification -> {rank}, {request_id}, {succesfull}")        
+        logger.debug(f"Sent prealloc notification -> {rank}, {request_id}, {successful}")        
         self.redis_client.lpush(f"prealloc{rank}", 
                                 msgpack_numpy.packb(transfer_data))
 
-    def _send_encoder_cache_metas(self, request_id: str, input_id: int,
-                                  encoder_cache_size: int) -> None:
+    def _send_encoder_cache_metas(
+        self, request_id: str, input_id: int,
+        num_encoder_tokens: int, mm_hash: str
+    ) -> None:
         # E -> PD
         transfer_data = {
             "request_id": request_id,
             "input_id": input_id,
-            "encoder_cache_size": encoder_cache_size
+            "num_encoder_tokens": num_encoder_tokens,
+            "mm_hash": mm_hash
         }
         rank = self._get_request_ranks(request_id)[1]
         logger.debug(f"Sent encode cache metadata -> {rank}, {request_id}")
         self.redis_client.lpush(f"cache_metas{rank}",
                                 msgpack_numpy.packb(transfer_data))
 
-    def _send_encoder_cache(self, request_id: str, input_id: int,
-                            encoder_cache: NDArray[np.float32]) -> None:
+    def _send_encoder_cache(
+        self, request_id: str, input_id: int,
+        encoder_cache: NDArray[np.float32], mm_hash: str) -> None:
         # E -> PD
         transfer_data = msgpack_numpy.packb({
             "request_id": request_id,
             "input_id": input_id,
-            "encoder_cache": encoder_cache
+            "encoder_cache": encoder_cache,
+            "mm_hash": mm_hash
         })
         rank = self._get_request_ranks(request_id)[1]
         logger.debug(f"Arif: Sent encode cache -> {rank}, {request_id}")
         self.redis_client.lpush(f"cache{rank}", transfer_data)
 
     def _recv_prealloc_notification(
-            self, maybe_send_cache_callback: Callable[[str, int, bool],
+            self, maybe_send_cache_callback: Callable[[str, int, bool, str],
                                                       None]) -> None:
         transfered_data = self.redis_client.blpop(f"prealloc{self.rank}")[1]
         transfered_data = msgpack_numpy.unpackb(transfered_data, raw=False)
-        request_id, input_id, succesfull = (
+        request_id, input_id, successful, mm_hash = (
             transfered_data["request_id"],
             transfered_data["input_id"],
-            transfered_data["succesfull"]
+            transfered_data["successful"],
+            transfered_data["mm_hash"]
         )
         logger.debug(f"Received prealloc notif -> {self.rank}, {request_id}")
-        maybe_send_cache_callback(request_id, input_id, succesfull)
+        maybe_send_cache_callback(request_id, input_id, successful, mm_hash)
 
     def _recv_encoder_cache_metas(
-            self, preallocate_callback: Callable[[str, int, int],
+            self, preallocate_callback: Callable[[str, int, int, str],
                                                  None]) -> None:
         transfered_data = self.redis_client.blpop(f"cache_metas{self.rank}")[1]
         transfered_data = msgpack_numpy.unpackb(transfered_data, raw=False)
-        request_id, input_id, encoder_cache_size = (
-            transfered_data["request_id"], transfered_data["input_id"],
-            transfered_data["encoder_cache_size"])
+        request_id, input_id, num_encoder_tokens, mm_hash = (
+            transfered_data["request_id"], 
+            transfered_data["input_id"],
+            transfered_data["num_encoder_tokens"],
+            transfered_data["mm_hash"]
+        )
         logger.debug(f"Received encoder metadata -> {self.rank}, {request_id}")
-        preallocate_callback(request_id, input_id, encoder_cache_size)
+        preallocate_callback(request_id, input_id, num_encoder_tokens, mm_hash)
 
     def _recv_encoder_cache(
-        self, injection_callback: Callable[[str, int, NDArray[np.float32]],
-                                           None]
+        self, 
+        injection_callback: Callable[[str, int, NDArray[np.float32], str],None]
     ) -> None:
         transfered_data = self.redis_client.blpop(f"cache{self.rank}")[1]
         transfered_data = msgpack_numpy.unpackb(transfered_data, raw=False)
-        request_id, input_id, encoder_cache = (
-            transfered_data["request_id"], transfered_data["input_id"],
-            transfered_data["encoder_cache"])
+        request_id, input_id, encoder_cache, mm_hash = (
+            transfered_data["request_id"], 
+            transfered_data["input_id"],
+            transfered_data["encoder_cache"],
+            transfered_data["mm_hash"]
+        )
         logger.debug(f"Received encoder cache -> {self.rank}, {request_id}")
-        injection_callback(request_id, input_id, encoder_cache)
+        injection_callback(request_id, input_id, encoder_cache, mm_hash)
