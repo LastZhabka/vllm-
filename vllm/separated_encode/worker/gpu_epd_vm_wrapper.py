@@ -89,7 +89,7 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
             self.requests[new_req_data.req_id] = CachedRequestState(
                 req_id=new_req_data.req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_inputs=new_req_data.mm_inputs,
+                mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=None,
                 pooling_params=None,
@@ -131,16 +131,13 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
 
         transfered_ids = self.ec_connector.get_transfered_ids()
         # logger.info(f"Arif: Transfered ids: {transfered_ids}")
-        model_runner_output = ModelRunnerOutput(
-            req_ids=[],
-            req_id_to_index={},
-            sampled_token_ids=[],
-            spec_token_ids=None,
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-            transfered_mm_data=transfered_ids
-        )
+
+        # Initialize the model runner output with default values 
+        # provides better compatibility with vLLM ModelRunnerOutput changes 
+        model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
+        # Assign transferred mm data 
+        model_runner_output.transfered_mm_data = transfered_ids
+        
         return model_runner_output
 
     # Don't initialize of KV cache on encode instance

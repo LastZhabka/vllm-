@@ -127,7 +127,7 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
             req_id = request.request_id
             self.active_requests.add(req_id)
             self.mm_inputs_done[req_id] = 0
-            self.mm_inputs_total[req_id] = len(request.mm_inputs) 
+            self.mm_inputs_total[req_id] = len(request.mm_hashes) 
             if req_id not in self.waiting_preallocs:
                 return
             for (input_id, size) in self.waiting_preallocs[req_id]:
