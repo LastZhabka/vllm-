@@ -167,14 +167,16 @@ class EncoderScheduler(SchedulerInterface):
             scheduled_encoder_inputs[request.request_id] = (
                 encoder_inputs_to_schedule)
             # Allocate the encoder cache.
-            for i in encoder_inputs_to_schedule:
-                self.encoder_cache_manager.allocate(request, i)
+            for input_id in encoder_inputs_to_schedule:
+                num_enc_tokens = request.get_num_encoder_tokens(input_id)
+                self.encoder_cache_manager.allocate(request, input_id)                
                 self.ec_connector.schedule_send_encoder_cache_metadata(
                     request.request_id,
-                    i,
-                    request.get_num_encoder_tokens(i)
+                    input_id,
+                    num_enc_tokens,
+                    request.mm_hashes[input_id]
                 )
-                self._allocated[(request.request_id, i)] = request.get_num_encoder_tokens(i)
+                self._allocated[(request.request_id, input_id)] = num_enc_tokens
             encoder_budget = new_encoder_budget
 
 
