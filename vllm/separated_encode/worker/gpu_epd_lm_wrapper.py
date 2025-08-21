@@ -90,7 +90,7 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         model_runner_output.injected_mm_data = injected_encoder_cache_ids
         return model_runner_output
 
-    def receive_encoder_cache(self, request_id, input_id, encoder_cache):
+    def receive_encoder_cache(self, request_id, input_id, encoder_cache, mm_hash):
         """
         Callback function for receiving encoder cache from remote instances.
         

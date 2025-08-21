@@ -167,7 +167,7 @@ The two-step allocation ensures that sufficient space will exist in the encoder 
 
 Since the complete request is not transfered from encode instance to prefill instance. This methods determines are using only the request's metadata.
 
-The manager also includes a `deallocate(self, req_id: str, input_id, encoder_cache_size)`method for encode instance to release cache space in encoder scheduler, we need this method because the encoder instance finishes request before encoder cache transfer.
+The manager also includes a `deallocate(self, req_id: str, input_id, num_encoder_tokens)` method for encode instance to release cache space in encoder scheduler, we need this method because the encoder instance finishes request before encoder cache transfer.
 
 ### EncoderCachePreallocator
 **Files:** `vllm/separated_encode/sched/encoder_cache_preallocator.py`
@@ -225,7 +225,7 @@ Separate EncoderScheduler class implementation is provided for encode instance s
 
 The EncoderScheduler is a specialized scheduler for encode instances that focuses on multimodal input processing. It maintains an _allocated dictionary to track allocated encoder cache entries and their sizes, this dictionary is used to allow us to finish the encode request before all related transfers are completed.
 
-The encode scheduler schedules all multimodal inputs for a request at once in the schedule() method. It checks if there's sufficient encoder cache space and budget before allocating all inputs together. A request on the encode instance is considered finished when all its multimodal embeddings have been computed, so all requests are finished in 1 iteration after scheduling, transfer is handled separately in encoder cache connectors, space allocated for encoder cache is deallocated only after succesfull transfers, not after request finish.
+The encode scheduler schedules all multimodal inputs for a request at once in the schedule() method. It checks if there's sufficient encoder cache space and budget before allocating all inputs together. A request on the encode instance is considered finished when all its multimodal embeddings have been computed, so all requests are finished in 1 iteration after scheduling, transfer is handled separately in encoder cache connectors, space allocated for encoder cache is deallocated only after successful transfers, not after request finish.
 
 In the update_from_output() method, the scheduler goes throguh transferred multimodal data IDs and deallocates the corresponding encoder cache entries.
 
@@ -285,7 +285,7 @@ The encoder connector operates in four distinct states based on instance type an
 - cache_to_avoid: Set of caches that failed preallocation
 - transfered_ids: List tracking successfully transferred cache IDs
 
-When encoder output is generated, add_encoder_cache() either stores the cache locally or immediately schedules transfer if a succesfull preallocation notification was already received. Upon receiving succesfull preallocation notifications via `_maybe_send_encoder_cache()`, it either sends the cache immediately or adds the request to the pending set. It can receive failed preallocation notification, it means that we don't need to send encoder cache to this instance and can delete the encoder cache for this (req_id, input_id) from the Encoder instance.
+When encoder output is generated, add_encoder_cache() either stores the cache locally or immediately schedules transfer if a successful preallocation notification was already received. Upon receiving successful preallocation notifications via `_maybe_send_encoder_cache()`, it either sends the cache immediately or adds the request to the pending set. It can receive failed preallocation notification, it means that we don't need to send encoder cache to this instance and can delete the encoder cache for this (req_id, input_id) from the Encoder instance.
 
 **State for Prefill Model Runner** - Receive-only state that accepts encoder cache data and calls injection callbacks to add the cache into the model runner's encoder cache dictionary.
 
