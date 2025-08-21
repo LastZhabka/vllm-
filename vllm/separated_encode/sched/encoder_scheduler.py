@@ -31,7 +31,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -348,4 +348,10 @@ class EncoderScheduler(SchedulerInterface):
         return None
 
     def reset_prefix_cache(self) -> bool:
+        pass
+
+    def update_draft_token_ids(
+        self,
+        draft_token_ids: "DraftTokenIds",
+    ) -> None:
         pass
