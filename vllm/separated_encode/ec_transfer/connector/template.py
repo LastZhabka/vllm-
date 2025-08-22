@@ -39,7 +39,7 @@ class ECConnectorTemplate(ABC):
         vllm_config: "VllmConfig",
         intra_instance_type: Literal["scheduler", "model-runner"],
         preallocate_callback: Optional[Callable[[str, int, int, str], None]],
-        injection_callback: Optional[Callable[[str, int, NDArray[np.float32]],
+        injection_callback: Optional[Callable[[str, int, NDArray[np.float32], str],
                                               None]],
     ):
         callback_mapping = {
