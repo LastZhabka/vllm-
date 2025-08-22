@@ -80,7 +80,7 @@ class RedisECConnector(ECConnectorTemplate):
             "mm_hash": mm_hash
         })
         rank = self._get_request_ranks(request_id)[1]
-        logger.debug(f"Arif: Sent encode cache -> {rank}, {request_id}")
+        logger.debug(f"Sent encode cache -> {rank}, {request_id}")
         self.redis_client.lpush(f"cache{rank}", transfer_data)
 
     def _recv_prealloc_notification(

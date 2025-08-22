@@ -151,7 +151,7 @@ async def chat_completions(request: Request):
         request_data = await request.json()
         is_streaming = request_data.get("stream", False)
         if not is_streaming:
-            raise RuntimeError("Only streaming requests are support in current implementation.")
+            raise HTTPException(status_code=501, detail="Only streaming requests are supported in the current implementation.")
 
         request_id = request.headers.get("x-request-id")
         if not request_id:
