@@ -130,7 +130,6 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
                     req_id, input_id, encoder_output, mm_hashes[input_id])
 
         transfered_ids = self.ec_connector.get_transfered_ids()
-        # logger.info(f"Arif: Transfered ids: {transfered_ids}")
 
         # Initialize the model runner output with default values 
         # provides better compatibility with vLLM ModelRunnerOutput changes 
