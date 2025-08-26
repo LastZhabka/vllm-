@@ -166,6 +166,10 @@ class EncoderCacheManager:
         Note:
             This method assumes can_allocate() returned True for the same input.
         """
+<<<<<<< HEAD
+=======
+
+>>>>>>> d8e830d84 (rebase: Add changes from code that wasn't yet merged)
 
         mm_hash = request.mm_hashes[input_id]
         request_id = request.request_id

@@ -241,7 +241,6 @@ class Scheduler(SchedulerInterface):
                  ) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_compute_budget)
-
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -812,7 +811,6 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_tokens
             mm_hashes_to_schedule.add(request.mm_hashes[i])
             encoder_inputs_to_schedule.append(i)
-
         return (
             encoder_inputs_to_schedule,
             num_new_tokens,
