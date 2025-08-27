@@ -49,7 +49,7 @@ flowchart LR
     end
 ```
 
-## Overall Process
+## Overall Process (Sequential requests)
  
 The separated encode overall process in 1E1PD with proxy scenario:
 
@@ -120,8 +120,13 @@ The implementation avoids large changes. Modifications to the model runner are m
 
 ## vLLM minor changes
 
+### Scheduler routing
+**Files:** `vllm/v1/core/core.py`
+
+During execution with EPD disaggregation, EngineCore now uses the Encoder Scheduler for the Encode instance.
+
 ### EPD Disaggregation Configuration
-**Files:** `vllm/config.py`, `vllm/core/arg_utils.py`
+**Files:** `vllm/config/__init__.py`, `vllm/core/arg_utils.py`
 
 Added a new configuration class for EPD disaggregation. Currently supports configuration of instance type, instance's EPD rank and the number of connector workers.
 
@@ -132,7 +137,7 @@ The model runner output now includes two additional data fields: `transfered_mm_
 
 The `transfered_mm_data` field passes a list of transfered encoder cache input IDs from the model runner to the scheduler on the encode instance. After receiving transfered data IDs, the scheduler will clear free space in the encoder cache manager.
 
-The `injected_mm_data` field passes a list of injected encoder cache input IDs from the model runner to the scheduler on the prefill instance. After receiving injected data IDs, the scheduler will clear free space in the encoder cache manager.
+The `injected_mm_data` field passes a list of injected encoder cache input IDs with `mm_hash` from the model runner to the scheduler on the prefill instance. After receiving injected data IDs, the scheduler will finalize allocations 
 
 ### Model Runner Wrapper Integration in GPUWorker
 **Files:** `vllm/v1/worker/gpu_worker.py`
@@ -142,57 +147,42 @@ When EPD disaggregation is enabled, the system uses wrapper classes of GPUModelR
 ### GPU Model Runner santiy check in encoder execution
 **Files:** `vllm/v1/worker/gpu_model_runner.py`
 
-If EPD disaggregated serving is enabled, an additional attribute is added to indicate whether encoder execution is allowed. This attribute is used to perform a sanity check on each execution of the encoder.
+If EPD disaggregated serving is enabled, an additional attribute is added to indicate whether encoder execution is allowed. This attribute is used to perform a sanity check on each execution of the encoder. Also encoder cache lock is added to ensure encoder cache injection safety. 
 
 ## Major Changes
 
 ### EncoderCacheManager new Allocation Logic
 **Files:** `vllm/v1/core/encoder_cache_manager.py`
 
-The EncoderCacheManager now contains methods for a two-step allocation process for remote encoder cache injection. This change introduces 4 new methods designed around the concept of preallocation, to reserve cache space for a request without immediately adding it to the cached dictionary.
+In disaggregated settings, encoder outputs need to be transferred between instances. This creates timing challenges: we must reserve cache space before receiving the data, but we can't mark it as cached until the transfer completes. For that the EncoderCacheManager now supports a two-stage allocation process for handling encoder outputs receiving. The two-stage process addresses this by separating reservation from finalization.
 
-The allocation process operates in two steps. In preallocation, the system reserves the required space by deducting it from the available encoder cache size. In allocation finalization, the request completes its allocation in the update_from_output scheduler function after successful encoder cache injection in the model runner. 
+The `preallocate()` method reserves cache space for incoming encoder outputs. It tracks which requests need which multimodal inputs and prevents premature eviction of entries that will be reused. This method returns whether the encoder output needs to be computed and transferred `(true)` or is already available in cache `(false)`.
 
-To implement such approach we need following functions:
+The `finalize_allocation()` method completes the allocation after encoder outputs are received. It converts the preallocation into an actual cached entry or releases the reservation if another request provided the data or mm input tokens prefilling is skipped due to prefix caching.
 
-`can_preallocate(cache_size)` - checks if sufficient space exists for preallocation using only the request's encoder cache size data.
-
-`preallocate(req_id, input_id, cache_size)` - takes cache_size slots in the encoder cache manager and adds the information that (req_id, input_id) is preallocated.
-
-`depreallocate(req_id, input_id)` - rolls back the preallocate action by freeing the allocated slots associated with (req_id, input_id). Used when we skip the multimodal input via prefix cache usage.
-
-`finalize_allocation(req_id, input_id)` - finalizes the allocation process by adding the (req_id, input_id) to the cached mapping, called after successful encoder cache injection to complete the allocation that was started with preallocate().
-
-The two-step allocation ensures that sufficient space will exist in the encoder cache manager for incoming requests after preallocation notification is sent. It also prevents direct allocation in the encoder cache manager until the actual cache injection occurs.
-
-Since the complete request is not transfered from encode instance to prefill instance. This methods determines are using only the request's metadata.
-
-The manager also includes a `deallocate(self, req_id: str, input_id, num_encoder_tokens)` method for encode instance to release cache space in encoder scheduler, we need this method because the encoder instance finishes request before encoder cache transfer.
+To prevent race conditions between eviction and incoming transfers, we don't evict caches that have active preallocations(not finalized allocations*).
 
 ### EncoderCachePreallocator
 **Files:** `vllm/separated_encode/sched/encoder_cache_preallocator.py`
+The EncoderCachePreallocator schedules preallocation requests. It synchronizes incoming requests with encoder metadata received asynchronously from encoding instances. The preallocator serves three essential purposes:
 
-The EncoderCachePreallocator system introduces a classes for managing encoder cache preallocation across distributed instances. This implementation provides two distinct strategies for handling encoder cache metadata and coordinating allocation decisions between encoder and scheduler instances.
+It synchronizes request arrival with encoder metadata reception. Since encoder metadata can arrive before or after the corresponding request, the preallocator buffers metadata for requests that haven't arrived yet and processes waiting metadata when requests do arrive.
 
-Implementation provides an abstract base class EncoderCachePreallocatorTemplate that defines the core interface for encoder cache preallocation management. This template defines abstract methods for request lifecycle management and create encoder cache connector object in init for receiving encoder cache metadata.
+It manages the preallocation queue to determine for which encode output when cache space should be reserved. The system maintains a queue of pending preallocations and validates each candidate against available cache capacity before proceeding with reservation. 
 
-Preallocator will asynchronously receive encoder cache metadata through `receive_encoder_cache_metadata()` callback, detailed preallocator behaivour is determined by concrete implementation, but in general it always **tries** to schedule preallocation of (req_id, input_id), if the (req_id, input_id) is schedulable, then it adds (req_id, input_id) to preallocation queue, that will be used in `get_prealloc_candidate`. 
+It tracks multimodal input processing progress to avoid unnecessary data transfers. When inputs are obtained from existing caches (KV cache or encoder cache), the preallocator sends notifications to cancel pending transfers and ignores subsequent metadata for those inputs.
 
-On each request addition and finish the preallocator's corresponding function is called to handle initialization and cleaning.
+The system provides an abstract base class `EncoderCachePreallocatorTemplate` that defines the interface for preallocation strategies. This template initializes the encoder cache connector for receiving metadata and defines abstract methods that concrete implementations must provide. And one concrete synchronous implementation example.
 
-As the scheduler processes tokens, it continuously updates the multimodal input completion status through preallocator's `update_mm_inputs_done()` method. This method determines which multimodal inputs have been fully processed based on their position in the token sequence and the number of computed tokens, that allows us to control which encoder caches are not required now.
+#### Request flow
 
-Two concrete implementations provide different allocation strategies:
+When encoder metadata arrives via the `_receive_encoder_cache_metadata` callback, the preallocator checks if the request is active. For active requests, it immediately schedules preallocation. For inactive requests, it stores the metadata in `waiting_preallocs` for later processing.
 
-~~AsyncEncoderCachePreallocator provides asynchronous approach that immediately triggers preallocation callbacks upon receiving encoder cache metadata. This implementation maintains minimal state and always accepts encoder cache, this allows to avoid additional request state tracking and synchronous approach.~~ Removed temporarily.
+Request addition triggers processing of any waiting metadata. The `add_request` method initializes tracking structures and schedules preallocations for any metadata that arrived early.
 
-SyncEncoderCachePreallocator implements a synchronous approach with  state tracking. It tracks active requests, pending preallocation requests, waiting preallocation metadata, and ignored preallocation entries, to decide whether instance needs to accept encoder cache, or we can reject it and use data from KV cache.
+As the tokens are processed, `update_mm_inputs_done` tracks which multimodal inputs are complete. When a pending input is covered by existing cache, the system sends a cancellation notification and marks it as ignored.
 
-Both implementations track multimodal input progress through `mm_inputs_done` and `mm_inputs_total` counters, updating completion status as tokens are computed, to clear the encoder cache after injection or to avoid accepting encoder cache for the mm input tokens that are covered by prefix cache. The `get_prealloc_candidate` method provides a interface for retrieving the next preallocation candidate based on available cache space, with options for immediate next candidate filling. If instance can't get candidate(either no candidates/no slots) it returns false.
-
-The preallocation queue operates on a first-come, first-served basis, with candidates being processed based on available encoder cache space. The system tracks which preallocations are pending to avoid duplicate processing and to ensure proper cleanup when preallocations become unnecessary.
-
-The preallocation system coordinates with encoder cache connectors to send preallocation notifications, enabling distributed coordination between instances that generate cache data and instances that manage allocation decisions.
+The `get_prealloc_candidate` method provides the interface for retrieving candidates from the queue. It validates each candidate against available space and skips ignored entries. The method returns whether to continue processing and the candidate data if valid. In the scheduler this method is called from `_perform_preallocations` method.
 
 ```mermaid
 sequenceDiagram
@@ -221,28 +211,28 @@ sequenceDiagram
 #### Encoder Scheduler (encode)
 **Files:** `vllm/separated_encode/sched/encoder_scheduler.py`
 
-Separate EncoderScheduler class implementation is provided for encode instance scheduling, while prefill and prefill+decode instances continue to use the main Scheduler class.
+Separate EncoderScheduler class implementation is provided for encode instance scheduling.
 
-The EncoderScheduler is a specialized scheduler for encode instances that focuses on multimodal input processing. It maintains an _allocated dictionary to track allocated encoder cache entries and their sizes, this dictionary is used to allow us to finish the encode request before all related transfers are completed.
+The EncoderScheduler is a specialized scheduler for encode instances that focuses on only multimodal input scheduling. It maintains an `_allocated` dictionary to track allocated encoder cache entries, their sizes and hashes. This dictionary is used to allow us to free up logical space without storing the request itself, which enables us to end the request before the data is transferred.
 
-The encode scheduler schedules all multimodal inputs for a request at once in the schedule() method. It checks if there's sufficient encoder cache space and budget before allocating all inputs together. A request on the encode instance is considered finished when all its multimodal embeddings have been computed, so all requests are finished in 1 iteration after scheduling, transfer is handled separately in encoder cache connectors, space allocated for encoder cache is deallocated only after successful transfers, not after request finish.
+Currently the encode scheduler schedules all multimodal inputs for a request at once in the `schedule()` method. It checks if there's sufficient encoder cache space and budget before allocating all inputs together. A request on the encode instance is considered finished when all its multimodal embeddings have been computed, so all requests are finished in 1 iteration after scheduling, transfer is handled separately in encoder cache connectors, space allocated for encoder cache is deallocated only after transfers, not after request finish.
 
-In the update_from_output() method, the scheduler goes throguh transferred multimodal data IDs and deallocates the corresponding encoder cache entries.
+In the `update_from_output()` method, the scheduler goes through transferred multimodal data IDs and frees the mm inputs in encoder cache manager.
 
 #### Main Scheduler (prefill and prefill+decode instances)
 **Files:** `vllm/v1/core/sched/scheduler.py`
 
-For prefill and prefill+decode instances, the main scheduler is changed for multimodal inputs encode separation, instance `max_num_encoder_input_tokens` value is set to 0 to avoid multimodal inputs encoder execution.
+For prefill and prefill+decode instances, the main scheduler is changed for multimodal inputs encode separation. 
 
-If current instance is the prefill(P) or prefill+decode(PD) instance, then we instantiate preallocator object in scheduler, this preallocator will manage communication and preallocation, also we set `max_num_encoder_input_tokens` to 0 to avoid the usage of the multimodal data encoder on P or PD instance.
+If encoder separation is turned on, we instantiate `encoder_cache_preallocator` object in scheduler, this preallocator handles communication through `ec_connector` in it and `preallocation` scheduling and synchronization, also we set `max_num_encoder_input_tokens` to 0 to avoid the usage of the multimodal data encoder on P or PD instance.
 
-Mostly main scheduler has 2 changes, integration of encoder cache preallocator and `_perform_preallocations()` into request lifecycle and injected data handling. 
+Mostly main scheduler has 3 changes, integration of `encoder_cache_preallocator`, `_perform_preallocations()` and `injected_mm_data` allocation. 
 
-The integration of `ec_preallocator` is described in the corresponding part of the documentation. For the `_perform_preallocations()` function, this function is used to connect `ec_preallocator`, which manages which requests will be preallocated, and the encoder cache manager, which actually performs preallocations. This function just keeps preallocations until there are enough slots in the encoder cache manager and enough preallocation requests. By default, `_perform_preallocations()` is called 2 times: in `update_after_schedule()` after freeing some encoder inputs, and in `update_from_output` after handling injected data.
+The  `encoder_cache_preallocator` is described in the corresponding part of the documentation. The `_perform_preallocations()` function is used to connect `encoder_cache_preallocator`, which manages which requests will be preallocated, and the encoder cache manager, in which we actually performs preallocations. This function just gets the preallocation candidate from the `encode_cache_preallocator` until there are enough slots in the `encoder_cache_manager`. Perform preallocation is called 2 times: in `update_after_schedule()` after some cache can  potentially become freeable, and in `update_from_output` after handling injected data.
 
-The injected data handling is performed with `injected_mm_data` obtained from `ModelRunnerOutput`, scheduler is going through injected data and decides whether the allocation is finalized or we don't need the obtained data anymore and we can `depreallocate` it.
+The injected data handling is performed via `injected_mm_data` attribute from `ModelRunnerOutput`, scheduler just going through injected data and decides whether the allocation needs to be finalized or we don't need the obtained data anymore and we can just say that this injected data is freeable.
 
-Such an implementation with is designed to avoid redundant processing or injection, ensure that scheduler will have enough slots after encoder cache arriving and ensure the deletion of encoder caches that cannot be used due to prefix caching or early request abortion.
+Such implementation allows us to achieve motivation described in changes for encoder cache manager, encoder cache preallocator and also more efficiently use caching techniques in EPD context.
 
 ### Instance-Specific Model Runner Wrappers
 **Files:** `vllm/separated_encode/worker/gpu_epd_lm_wrapper.py`, `vllm/separated_encode/worker/gpu_epd_vm_wrapper.py`

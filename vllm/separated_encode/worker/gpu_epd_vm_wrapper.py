@@ -59,6 +59,7 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
         self.instance_type = vllm_config.epd_disagg_config.instance_type
         self.ec_connector = RedisECConnector(
             vllm_config=vllm_config,
+            device=device,
             intra_instance_type="model-runner",
             preallocate_callback=None,
             injection_callback=None,
@@ -121,10 +122,11 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
             mm_hashes = self.requests[req_id].mm_hashes
             for input_id in mm_input_ids:
                 mm_hash = mm_hashes[input_id]
-                encoder_output = self.encoder_cache[mm_hash]\
-                    .to("cpu", dtype = torch.float32).numpy()
                 self.ec_connector.add_encoder_cache(
-                    req_id, input_id, encoder_output, mm_hash
+                    req_id, 
+                    input_id, 
+                    self.encoder_cache[mm_hash], 
+                    mm_hash
                 )
 
         transfered_ids = self.ec_connector.get_transfered_ids()
