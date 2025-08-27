@@ -6,8 +6,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Literal, Optional
 
-import numpy as np
-from numpy.typing import NDArray
+import torch
 
 from vllm.config import EPDDisaggConfig, VllmConfig
 from vllm.logger import init_logger
@@ -37,9 +36,10 @@ class ECConnectorTemplate(ABC):
     def __init__(
         self,
         vllm_config: "VllmConfig",
+        device: Optional[torch.device],
         intra_instance_type: Literal["scheduler", "model-runner"],
         preallocate_callback: Optional[Callable[[str, int, int, str], None]],
-        injection_callback: Optional[Callable[[str, int, NDArray[np.float32], str],
+        injection_callback: Optional[Callable[[str, int, torch.Tensor, str],
                                               None]],
     ):
         callback_mapping = {
@@ -55,12 +55,14 @@ class ECConnectorTemplate(ABC):
             ("prefill+decode", "model-runner"): (self._recv_encoder_cache,
                                                  injection_callback)
         }
+        self.device = device
+        self.dtype = vllm_config.model_config.dtype
 
         self.epd_disagg_config: EPDDisaggConfig
         self.intra_instance_type: Literal["scheduler", "model-runner"]
         self.inter_instance_type: Literal["encode", "prefill",
                                           "prefill+decode"]
-        self.encoder_cache: dict[str, dict[int, NDArray[np.float32]]]
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]]
         self.send_executors: ThreadPoolExecutor
         self.recv_executors: ThreadPoolExecutor
 
@@ -143,7 +145,7 @@ class ECConnectorTemplate(ABC):
     @abstractmethod
     def _send_encoder_cache(
         self, request_id: str, input_id: int,
-        encoder_cache: NDArray[np.float32], mm_hash: str
+        encoder_cache: torch.Tensor, mm_hash: str
     ) -> None:
         """Send the encoder cache.
 
@@ -204,7 +206,7 @@ class ECConnectorTemplate(ABC):
     @abstractmethod
     def _recv_encoder_cache(
         self, 
-        injection_callback: Callable[[str, int, NDArray[np.float32], str],None]
+        injection_callback: Callable[[str, int, torch.Tensor, str],None]
     ) -> None:
         """Receives the encoder cache and calls injection callback
 
@@ -224,7 +226,7 @@ class ECConnectorTemplate(ABC):
         pass
 
     def add_encoder_cache(self, request_id: str, input_id: int,
-                          encoder_cache: NDArray[np.float32], mm_hash: str):
+                          encoder_cache: torch.Tensor, mm_hash: str):
         """Add an encoder cache to the EC connector.
 
         This method adds the encoder cache to the self.encoder_cache dictionary
@@ -360,7 +362,7 @@ class ECConnectorTemplate(ABC):
 
     def schedule_send_encoder_cache(
         self, request_id: str, input_id: int,
-        encoder_cache: NDArray[np.float32], mm_hash: str
+        encoder_cache: torch.Tensor, mm_hash: str
     ) -> None:
         """Schedule encoder cache sending
 
@@ -377,7 +379,7 @@ class ECConnectorTemplate(ABC):
 
     def _finish_wrapper(
         self, callback: Callable, request_id: str, input_id: int,
-        encoder_cache: NDArray[np.float32], mm_hash: str
+        encoder_cache: torch.Tensor, mm_hash: str
     ):
 
         callback(request_id, input_id, encoder_cache, mm_hash)

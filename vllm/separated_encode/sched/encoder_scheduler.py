@@ -98,9 +98,13 @@ class EncoderScheduler(SchedulerInterface):
         
         self.ec_connector = RedisECConnector(
             vllm_config = self.vllm_config,
+            device=None,
+            # no need to pass device if intra_instance_type scheduler
             intra_instance_type = "scheduler",
             preallocate_callback = None,
-            injection_callback = None
+            injection_callback = None,
+            redis_host="localhost", # replace with ec_transfer_config later
+            redis_port=6379,        # replace with ec_transfer_config later
         )
         self._allocated: dict[str, dict[int, tuple[int, str]]] = {}
 
@@ -115,7 +119,7 @@ class EncoderScheduler(SchedulerInterface):
         
         # For logging.
         scheduled_timestamp = time.monotonic()
-
+        # mm input is processed in 1 step.
         while self.waiting and token_budget > 0:
             if len(self.running) == self.max_num_running_reqs:
                 break

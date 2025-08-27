@@ -3,14 +3,13 @@
 from typing import Callable, Literal, Optional
 
 import msgpack_numpy
-import numpy as np
 import redis
-from numpy.typing import NDArray
 
 from vllm.config import VllmConfig
 from vllm.separated_encode.ec_transfer.connector.template import (
     ECConnectorTemplate)
 from vllm.logger import init_logger
+import torch
 
 logger = init_logger(__name__)
 
@@ -18,17 +17,19 @@ class RedisECConnector(ECConnectorTemplate):
 
     def __init__(self,
                  vllm_config: "VllmConfig",
+                 device: Optional[torch.device],
                  intra_instance_type: Literal["scheduler", "model-runner"],
                  preallocate_callback: Optional[Callable[[str, int, int, str],
                                                          None]],
                  injection_callback: Optional[Callable[
-                     [str, int, NDArray[np.float32], str], None]],
+                     [str, int, torch.Tensor, str], None]],
                  redis_host: str = "localhost",
                  redis_port: int = 6379):
         self.redis_client = redis.StrictRedis(host=redis_host, port=redis_port)
         self.rank = vllm_config.epd_disagg_config.epd_rank
         super().__init__(
             vllm_config,
+            device,
             intra_instance_type,
             preallocate_callback,
             injection_callback,
@@ -71,12 +72,13 @@ class RedisECConnector(ECConnectorTemplate):
 
     def _send_encoder_cache(
         self, request_id: str, input_id: int,
-        encoder_cache: NDArray[np.float32], mm_hash: str) -> None:
+        encoder_cache: torch.Tensor, mm_hash: str) -> None:
         # E -> PD
+        encoder_cache_numpy = encoder_cache.to("cpu", dtype=torch.float16).numpy()
         transfer_data = msgpack_numpy.packb({
             "request_id": request_id,
             "input_id": input_id,
-            "encoder_cache": encoder_cache,
+            "encoder_cache": encoder_cache_numpy,
             "mm_hash": mm_hash
         })
         rank = self._get_request_ranks(request_id)[1]
@@ -113,7 +115,7 @@ class RedisECConnector(ECConnectorTemplate):
 
     def _recv_encoder_cache(
         self, 
-        injection_callback: Callable[[str, int, NDArray[np.float32], str],None]
+        injection_callback: Callable[[str, int, torch.Tensor, str],None]
     ) -> None:
         transfered_data = self.redis_client.blpop(f"cache{self.rank}")[1]
         transfered_data = msgpack_numpy.unpackb(transfered_data, raw=False)
@@ -123,5 +125,7 @@ class RedisECConnector(ECConnectorTemplate):
             transfered_data["encoder_cache"],
             transfered_data["mm_hash"]
         )
+        encoder_cache = torch.from_numpy(encoder_cache).to(
+                device=self.device, dtype=self.dtype)   
         logger.debug(f"Received encoder cache -> {self.rank}, {request_id}")
         injection_callback(request_id, input_id, encoder_cache, mm_hash)

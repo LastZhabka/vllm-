@@ -45,31 +45,45 @@ async def shutdown_event():
     if decode_session:
         await decode_session.close()
 
+
+def has_mm_input(request_data: dict):
+    if "messages" not in request_data:
+        return False
+    for message in request_data["messages"]:  
+        if not isinstance(message.get("content"), list):  
+            continue
+        for content_item in message["content"]:  
+            if content_item.get("type") in ["image_url", "audio_url", "input_audio"]:  
+                return True 
+    return False
+
 async def forward_streaming_request(
     request_data: dict,
     request_id: str
 ) -> AsyncIterator[str]:
     headers = {"x-request-id": request_id}
-    task1 = asyncio.create_task(
-        encode_session.post(
-            f"{ENCODE_SERVER_URL}/v1/chat/completions",
-            json=request_data,
-            headers=headers
-        )
-    )
-    try:
-        response = await task1
-        if response.status != 200:
-            error_text = await response.text()
-            raise HTTPException(
-                status_code=response.status,
-                detail={"error": "Request failed", "message": error_text}
+    # Skip request to encoder instance if we don't have mm input
+    if has_mm_input(request_data):
+        task1 = asyncio.create_task(
+            encode_session.post(
+                f"{ENCODE_SERVER_URL}/v1/chat/completions",
+                json=request_data,
+                headers=headers
             )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "Internal server error", "message": str(e)}
         )
+        try:
+            response = await task1
+            if response.status != 200:
+                error_text = await response.text()
+                raise HTTPException(
+                    status_code=response.status,
+                    detail={"error": "Request failed", "message": error_text}
+                )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Internal server error", "message": str(e)}
+            )
 
     try:
         async with decode_session.post(
@@ -83,7 +97,6 @@ async def forward_streaming_request(
                     yield chunk.decode('utf-8', errors='ignore')
     except Exception as e:
         logger.error(f"Error in streaming: {e}")
-        task1.cancel()
         raise
 
 async def forward_non_streaming_request(
@@ -91,29 +104,30 @@ async def forward_non_streaming_request(
     request_id: str
 ) -> dict:
     headers = {"x-request-id": request_id}
-    
-    # Start request to encode server
-    task1 = asyncio.create_task(
-        encode_session.post(
-            f"{ENCODE_SERVER_URL}/v1/chat/completions",
-            json=request_data,
-            headers=headers
-        )
-    )
-
-    try:
-        response = await task1
-        if response.status != 200:
-            error_text = await response.text()
-            raise HTTPException(
-                status_code=response.status,
-                detail={"error": "Request failed", "message": error_text}
+    # Skip request to encoder instance if we don't have mm input
+    if has_mm_input(request_data):
+        # Start request to encode server
+        task1 = asyncio.create_task(
+            encode_session.post(
+                f"{ENCODE_SERVER_URL}/v1/chat/completions",
+                json=request_data,
+                headers=headers
             )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "Internal server error", "message": str(e)}
         )
+
+        try:
+            response = await task1
+            if response.status != 200:
+                error_text = await response.text()
+                raise HTTPException(
+                    status_code=response.status,
+                    detail={"error": "Request failed", "message": error_text}
+                )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Internal server error", "message": str(e)}
+            )
 
     try:
         # Make request to decode server
@@ -127,7 +141,6 @@ async def forward_non_streaming_request(
         return result
     except Exception as e:
         logger.error(f"Error in non-streaming: {e}")
-        task1.cancel()
         raise
 
 @app.post("/v1/chat/completions")

@@ -59,6 +59,7 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         self.instance_type = vllm_config.epd_disagg_config.instance_type
         self.ec_connector = RedisECConnector(
             vllm_config=vllm_config,
+            device=device,
             intra_instance_type="model-runner",
             preallocate_callback=None,
             injection_callback=self.receive_encoder_cache,
@@ -104,6 +105,5 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         scheduler about successful cache injections.
         """
         with self.encoder_cache_lock:
-            self.encoder_cache[mm_hash] = torch.from_numpy(encoder_cache).to(
-                device=self.device, dtype=self.dtype)
+            self.encoder_cache[mm_hash] = encoder_cache
             self.injected_encoder_cache_ids.append((request_id, input_id, mm_hash))
