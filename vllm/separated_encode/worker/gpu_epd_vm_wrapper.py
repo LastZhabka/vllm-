@@ -110,9 +110,6 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
         inputs, and transferring computed encoder caches to remote instances 
         via a connector, while providing transfer status information to the 
         scheduler. 
-        
-        It also converts encoder outputs into CPU tensors and then to numpy 
-        arrays to prepare data for the transfer.        
         """
         self._update_states(scheduler_output)
         self._execute_mm_encoder(scheduler_output)

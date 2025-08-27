@@ -226,6 +226,8 @@ class EncoderScheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:            
+        
+        # clean up the logic space of mm_data that was transfered
         transfered_mm_data = model_runner_output.transfered_mm_data
 
         for (req_id, input_id) in transfered_mm_data:
@@ -241,6 +243,7 @@ class EncoderScheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
 
+        # stop all requests from the current batch
         model_finished = []
         for request in self.running:
             req_id = request.request_id

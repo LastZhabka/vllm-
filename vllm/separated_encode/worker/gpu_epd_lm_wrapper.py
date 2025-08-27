@@ -91,15 +91,19 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         model_runner_output.injected_mm_data = injected_encoder_cache_ids
         return model_runner_output
 
-    def receive_encoder_cache(self, request_id, input_id, encoder_cache, mm_hash):
+    def receive_encoder_cache(
+        self, 
+        request_id: str, 
+        input_id: int, 
+        encoder_cache: torch.Tensor, 
+        mm_hash: str
+    ):
         """
         Callback function for receiving encoder cache from remote instances.
         
         This method is invoked by the encoder cache connector when encoder
-        cache data is received from remote encoder instances. It processes
-        the received numpy array by converting it to a PyTorch tensor with
-        the correct device placement and data type, then stores it in the
-        local encoder cache dictionary.
+        cache data is received from remote encoder instances, then It stores 
+        received tensor in the local encoder_cache dictionary.
         
         The method updates the injected encoder cache IDs list to inform the
         scheduler about successful cache injections.

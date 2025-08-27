@@ -155,7 +155,7 @@ class ECConnectorTemplate(ABC):
         Args:
             request_id: id of the encoder cache's request.
             input_id: index of the mm input amoung request's mm inputs
-            encoder_cache: cache produced by vision model, in np array form
+            encoder_cache: encoder output
             mm_hash: hash of the mm input
         """
         pass
@@ -371,7 +371,7 @@ class ECConnectorTemplate(ABC):
         Args:
             request_id: id of the encoder cache's request.
             input_id: index of the mm input amoung request's mm inputs
-            encoder_cache: cache produced by vision model, in np array form
+            encoder_cache: encoder output 
         """
         self.send_tasks_queue.put_nowait(
             (self._finish_wrapper, (self._send_encoder_cache, request_id,
@@ -381,16 +381,18 @@ class ECConnectorTemplate(ABC):
         self, callback: Callable, request_id: str, input_id: int,
         encoder_cache: torch.Tensor, mm_hash: str
     ):
-
+        """
+        Wrapper to fill the transfered_ids list
+        """
         callback(request_id, input_id, encoder_cache, mm_hash)
         with self.transfered_ids_lock:
             self.transfered_ids.append((request_id, input_id))
 
     def get_transfered_ids(self, ):
+        """
+        Method to get transfered ids
+        """
         with self.transfered_ids_lock:
             transfered_ids = self.transfered_ids
             self.transfered_ids = []
             return transfered_ids
-
-    def finish_request(self, req_id):
-        pass
