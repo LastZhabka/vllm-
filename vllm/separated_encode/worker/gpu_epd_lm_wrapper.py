@@ -90,7 +90,7 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         model_runner_output.injected_mm_data = injected_encoder_cache_ids
         return model_runner_output
 
-    def receive_encoder_cache(self, request_id, input_id, encoder_cache):
+    def receive_encoder_cache(self, request_id, input_id, encoder_cache, mm_hash):
         """
         Callback function for receiving encoder cache from remote instances.
         
@@ -104,9 +104,6 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         scheduler about successful cache injections.
         """
         with self.encoder_cache_lock:
-            if request_id not in self.encoder_cache:
-                self.encoder_cache[request_id] = {}
-            encoder_cache = torch.from_numpy(encoder_cache)
-            self.encoder_cache[request_id][input_id] = encoder_cache.to(
+            self.encoder_cache[mm_hash] = torch.from_numpy(encoder_cache).to(
                 device=self.device, dtype=self.dtype)
-            self.injected_encoder_cache_ids.append((request_id, input_id))
+            self.injected_encoder_cache_ids.append((request_id, input_id, mm_hash))
