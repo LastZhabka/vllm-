@@ -112,7 +112,7 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
                     self.ec_connector.schedule_send_prealloc_notification(
                         req_id, input_id, False, mm_hash
                     )
-                    return            
+                    return
                 self.received_metas_reqs.add((req_id, input_id))
                 if req_id not in self.active_requests:
                     if req_id not in self.waiting_preallocs:
@@ -168,7 +168,7 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
             if self.prealloc_candidate is None:
                 if fill_next is True:
                     self.prealloc_candidate = self.preallocs_queue.get()
-                return (True, None) # No candidate get next
+                return (True, None) # No candidate, just get next candidate
                 
             (request_id, input_id, num_encoder_tokens, mm_hash) = \
                 self.prealloc_candidate
@@ -186,7 +186,15 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
             
             self.pending_preallocs[request_id].remove(input_id)
 
-            self.ec_connector.schedule_send_prealloc_notification(
-                request_id, input_id, True, mm_hash
-            )
-            return (True, (request_id, input_id, num_encoder_tokens))
+            return (True, (request_id, input_id, num_encoder_tokens, mm_hash))
+        
+    def send_prealloc_notification(
+        self, 
+        req_id: str, 
+        input_id: int, 
+        is_receiving_required: bool, 
+        mm_hash: str
+    ):
+        self.ec_connector.schedule_send_prealloc_notification(
+            req_id, input_id, is_receiving_required, mm_hash
+        )

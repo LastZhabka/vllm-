@@ -57,7 +57,6 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
             "Can't use Encode instance without EPD disaggregation"
 
         self.instance_type = vllm_config.epd_disagg_config.instance_type
-        self.mm_hashes: dict[str, list[str]] = {}
         self.ec_connector = RedisECConnector(
             vllm_config=vllm_config,
             intra_instance_type="model-runner",
@@ -76,21 +75,18 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
         the requests needed for encoder processing.
         """
         for req_id in scheduler_output.finished_req_ids:
-            self.mm_hashes.pop(req_id, None)
             self.requests.pop(req_id, None)
         
-        for (req_id, input_id) in scheduler_output.free_encoder_input_ids:
-            self.encoder_cache[req_id].pop(input_id)
-            if not self.encoder_cache[req_id]:
-                self.encoder_cache.pop(req_id)
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.pop(mm_hash)
 
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            self.mm_hashes[new_req_data.req_id] = new_req_data.mm_hashes
             self.requests[new_req_data.req_id] = CachedRequestState(
                 req_id=new_req_data.req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
+                mm_hashes = new_req_data.mm_hashes,
                 sampling_params=None,
                 pooling_params=None,
                 generator=None,
@@ -122,12 +118,14 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
 
         for req_id, mm_input_ids in scheduled_encoder_inputs.items():
-            mm_hashes = self.mm_hashes[req_id]
+            mm_hashes = self.requests[req_id].mm_hashes
             for input_id in mm_input_ids:
-                encoder_output = self.encoder_cache[req_id][input_id]\
+                mm_hash = mm_hashes[input_id]
+                encoder_output = self.encoder_cache[mm_hash]\
                     .to("cpu", dtype = torch.float32).numpy()
                 self.ec_connector.add_encoder_cache(
-                    req_id, input_id, encoder_output, mm_hashes[input_id])
+                    req_id, input_id, encoder_output, mm_hash
+                )
 
         transfered_ids = self.ec_connector.get_transfered_ids()
 

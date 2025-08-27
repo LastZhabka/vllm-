@@ -861,12 +861,11 @@ class Scheduler(SchedulerInterface):
         injected_mm_data = model_runner_output.injected_mm_data
         
         if self.separated_encode:
-            for (req_id, input_id) in injected_mm_data:
-                if self.ec_preallocator.mm_inputs_done[req_id] <= input_id:
-                    self.encoder_cache_manager.finalize_allocation(
-                        req_id, input_id)
-                else:
-                    self.encoder_cache_manager.depreallocate(req_id, input_id)
+            for (req_id, input_id, mm_hash) in injected_mm_data:
+                is_skipped = not (self.ec_preallocator.mm_inputs_done[req_id] <= input_id) 
+                self.encoder_cache_manager.finalize_allocation(
+                    req_id, input_id, mm_hash, is_skipped 
+                )
             # Finalize allocations or get rid of them
             self._perform_preallocations()
 
@@ -1294,10 +1293,28 @@ class Scheduler(SchedulerInterface):
                 if not prealloc: # can't preallocate
                     return
                 if candidate is not None:
-                    self.encoder_cache_manager.preallocate(*candidate)
+                    self.encoder_cache_manager.can_allocate_tokens(candidate[2])
+                    is_receiving_required = self.encoder_cache_manager.preallocate(
+                        *candidate
+                    )
+                    self.ec_preallocator.send_prealloc_notification(
+                        candidate[0],
+                        candidate[1],
+                        is_receiving_required,
+                        candidate[3],
+                    )
             # last element
             
             prealloc, candidate = self.ec_preallocator.get_prealloc_candidate(
                 self.encoder_cache_manager.num_free_slots, fill_next = False)
             if (candidate is not None):
-                self.encoder_cache_manager.preallocate(*candidate)
+                self.encoder_cache_manager.can_allocate_tokens(candidate[2])                
+                is_receiving_required = self.encoder_cache_manager.preallocate(
+                    *candidate
+                )
+                self.ec_preallocator.send_prealloc_notification(
+                    candidate[0],
+                    candidate[1],
+                    is_receiving_required,
+                    candidate[3],
+                )
