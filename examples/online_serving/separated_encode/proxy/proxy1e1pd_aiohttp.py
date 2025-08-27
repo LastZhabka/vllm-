@@ -7,7 +7,6 @@ from typing import AsyncIterator, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 import aiohttp
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel
 import uvicorn
 import argparse
 import logging
@@ -58,7 +57,20 @@ async def forward_streaming_request(
             headers=headers
         )
     )
-    await task1
+    try:
+        response = await task1
+        if response.status != 200:
+            error_text = await response.text()
+            raise HTTPException(
+                status_code=response.status,
+                detail={"error": "Request failed", "message": error_text}
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Internal server error", "message": str(e)}
+        )
+
     try:
         async with decode_session.post(
             f"{PREFILL_DECODE_SERVER_URL}/v1/chat/completions",
@@ -88,7 +100,21 @@ async def forward_non_streaming_request(
             headers=headers
         )
     )
-    await task1
+
+    try:
+        response = await task1
+        if response.status != 200:
+            error_text = await response.text()
+            raise HTTPException(
+                status_code=response.status,
+                detail={"error": "Request failed", "message": error_text}
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Internal server error", "message": str(e)}
+        )
+
     try:
         # Make request to decode server
         async with decode_session.post(
