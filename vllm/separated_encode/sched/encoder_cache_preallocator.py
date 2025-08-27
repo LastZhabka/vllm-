@@ -18,38 +18,108 @@ logger = init_logger(__name__)
 
 
 class EncoderCachePreallocatorTemplate(ABC):
+    """Abstract base class for encoder cache preallocation strategies.
 
+    Defines the interface for managing encoder cache preallocation in 
+    disaggregated deployments. Concrete implementations handle the coordination
+    between encoding and prefill instances, ensuring cache space is reserved
+    before encoder outputs are transferred.
+
+    This template provides the connection infrastructure through RedisECConnector
+    and defines the required methods that subclasses must implement to handle
+    request lifecycle, preallocation scheduling, and metadata reception.
+
+    Attributes:
+        ec_connector: Redis-based connector for communication between instances.
+            Handles metadata reception and preallocation notifications.
+    """
     def __init__(self, vllm_config: VllmConfig):
+        """Initialize the preallocator with ECConnector."""
         self.ec_connector = RedisECConnector(
-            vllm_config,
-            "scheduler",
-            self._receive_encoder_cache_metadata,
-            None
+            vllm_config = vllm_config,
+            device = None,
+            # no need to pass device if intra_instance_type scheduler
+            intra_instance_type = "scheduler",
+            preallocate_callback = self._receive_encoder_cache_metadata,
+            injection_callback = None,
+            redis_host="localhost", # replace with ec_transfer_config later
+            redis_port=6379,        # replace with ec_transfer_config later
         )
 
     @abstractmethod
-    def is_empty(self,):
+    def is_empty(self,) -> bool:
+        """Check if there are pending preallocations to process.
+        """
         pass 
     
     @abstractmethod
     def add_request(self, request: Request):
+        """Register a new request for preallocation tracking.
+
+        Called when a request arrives at the prefill instance. Implementations
+        should initialize tracking structures and process any metadata that
+        arrived before the request.
+        """
         pass
 
     @abstractmethod
     def finish_request(self, request: Request):
+        """Clean up resources for a finished or cancelled request.
+
+        Called when a request completes, is cancelled, or is aborted.
+        Implementations should remove all tracking information and handle
+        any pending preallocations for this request.
+        """
         pass
 
     @abstractmethod
     def update_mm_inputs_done(self, request: Request):
+        """Update multimodal input processing progress for a request.
+        """
         pass
 
     @abstractmethod
     def _receive_encoder_cache_metadata(
-        self, req_id: str, input_id: int, size: int
+        self, req_id: str, input_id: int, size: int, mm_hash: str
     ):     
+        """Handle incoming encoder cache metadata from encoding instance.
+
+        Callback method invoked by ec_connector when metadata arrives.
+        Implementations should handle both cases where the request is
+        already active and where metadata arrives before the request.
+        """
         pass
 
 class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
+    """Synchronous preallocation manager for encoder cache in disaggregated systems.
+
+    This class coordinates the preallocations of encoder cache space between
+    encoding and prefill instances in a disaggregated deployment. It ensures
+    that cache space is reserved before encoder outputs are transferred between
+    instances, manages the lifecycle of multimodal inputs across distributed 
+    processing stages, handles out-of-order arrival of encoder metadata and
+    ensures proper synchronization between request arrival and encoder cache
+    metadata receiving.
+
+    Key responsibilities:
+    - Queue and schedule preallocation requests
+    - Track multimodal input processing progress for each request
+    - Handle metadata that arrives before or after request initialization
+    - Send notification through EC Connector
+    - Provide requests with inputs that are ready for preallocations
+    - Clean up resources for finished & cancelled requests
+
+    Attributes:
+        active_requests: Set of request IDs currently being processed.
+        mm_inputs_done: Maps request ID to number of processed multimodal inputs.
+        mm_inputs_total: Maps request ID to total number of multimodal inputs.
+        preallocs_queue: Queue of pending preallocation requests.
+        prealloc_candidate: Current preallocation being considered for processing.
+        pending_preallocs: Maps request ID to set of input IDs awaiting preallocation.
+        waiting_preallocs: Stores preallocation data for requests not yet received on instance.
+        ignored_preallocs: Set of (request_id, input_id) pairs to skip.
+        received_metas_reqs: Set of (request_id, input_id) pairs with received metadata.
+    """
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -96,6 +166,11 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
 
     def _schedule_prealloc_request(self, req_id: str, input_id: int, 
                                    size: int, mm_hash: str):
+        """Schedule a preallocation request for processing.
+
+        Internal method that adds a preallocation request to the queue and
+        tracks it in pending_preallocs.
+        """
         if req_id not in self.pending_preallocs:
             self.pending_preallocs[req_id] = set()  
         self.pending_preallocs[req_id].add(input_id)
@@ -103,7 +178,13 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
 
     def _receive_encoder_cache_metadata(self, req_id: str, input_id: int,
                                         size: int, mm_hash: str):
-        # callback function
+        """Handle incoming encoder cache metadata from encoding instance.
+
+        This callback processes metadata about encoder outputs that need to be
+        transferred. If the request is active, it schedules preallocation. If not,
+        it stores the metadata for later processing when the request arrives.
+        """
+
         with self.scheduling_lock:
             with self.recv_lock:
                 if (req_id, input_id) in self.ignored_preallocs:
@@ -123,6 +204,11 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
                 self._schedule_prealloc_request(req_id, input_id, size, mm_hash)
 
     def add_request(self, request: Request):
+        """Register a new request and process any waiting preallocations.
+
+        When a request arrives, this method initializes tracking structures and
+        processes any encoder metadata that arrived before the request.
+        """
         with self.recv_lock:
             req_id = request.request_id
             self.active_requests.add(req_id)
@@ -136,6 +222,13 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
             self.waiting_preallocs.pop(req_id)
 
     def update_mm_inputs_done(self, request: Request):
+        """Update the progress of multimodal input processing for a request.
+
+        Tracks which multimodal inputs have been fully processed based on the
+        number of computed tokens. For inputs that were prealloc candidates but
+        are now obtained from cache, sends notifications to cancel transfers.
+        """
+
         if not request.has_encoder_inputs:
             return
         
@@ -162,8 +255,27 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
             
             self.mm_inputs_done[req_id] = mm_inputs_done_local
 
-    def get_prealloc_candidate(self, free_space: int, fill_next: bool):
-        #-> tuple[bool, tuple[str, int, int]]:
+    def get_prealloc_candidate(
+        self, free_space: int, fill_next: bool
+    ) -> tuple[bool, tuple[str, int, int, str] | None]:
+        """Validate the preallocation candidate, fill the next preallocation
+        candidate
+
+        Validate current preallocation candidate, retrieves the next 
+        preallocation request from the queue. Skips ignored preallocations
+        and checks whether prellocated data will fit in space constraints.
+
+        Args:
+            free_space: Available cache space in encoder tokens.
+            fill_next: Whether to fetch the next candidate after processing.
+
+        Returns:
+            Tuple of (should_continue, candidate_data) where:
+            - should_continue: True if caller should continue preallocations, 
+                               False if caller should stop.
+            - candidate_data: None or tuple of (request_id, input_id, 
+              num_encoder_tokens, mm_hash)
+        """
         with self.scheduling_lock:
             if self.prealloc_candidate is None:
                 if fill_next is True:
@@ -195,6 +307,7 @@ class SyncEncoderCachePreallocator(EncoderCachePreallocatorTemplate):
         is_receiving_required: bool, 
         mm_hash: str
     ):
+        """Send a preallocation notification to the encoding instance."""
         self.ec_connector.schedule_send_prealloc_notification(
             req_id, input_id, is_receiving_required, mm_hash
         )
