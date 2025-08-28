@@ -220,7 +220,9 @@ Separate EncoderScheduler class implementation is provided for encode instance s
 
 The EncoderScheduler is a specialized scheduler for encode instances that focuses on only multimodal input scheduling. It maintains an `_allocated` dictionary to track allocated encoder cache entries, their sizes and hashes. This dictionary is used to allow us to free up logical space without storing the request itself, which enables us to end the request before the data is transferred.
 
-Currently the encode scheduler schedules all multimodal inputs for a request at once in the `schedule()` method. It checks if there's sufficient encoder cache space and budget before allocating all inputs together. A request on the encode instance is considered finished when all its multimodal embeddings have been computed, so all requests are finished in 1 iteration after scheduling, transfer is handled separately in encoder cache connectors, space allocated for encoder cache is deallocated only after transfers, not after request finish.
+Currently the encode scheduler schedules all multimodal inputs for a request at once in the `schedule()` method. It checks if there's sufficient encoder cache space and budget before allocating all inputs together. Note that input is already cached we will still add it into the `scheduled_encoder_inputs`, but we will not allocate space for it and on model runner we will skip the encoder execution for such elements, we need to do that because in `model_runner` the signal needs to be sent to `ECConnector` from each `mm_input`.  
+
+A request on the encode instance is considered finished when all its multimodal embeddings have been computed, so all requests are finished in 1 iteration after scheduling, transfer is handled separately in encoder cache connectors, space allocated for encoder cache is deallocated only after transfers, not after request finish.
 
 In the `update_from_output()` method, the scheduler goes through transferred multimodal data IDs and frees the mm inputs in encoder cache manager.
 
@@ -250,7 +252,9 @@ This wrapper runs on encode instances and processes multimodal inputs. It execut
 
 The encode instance doesn't need KV cache since it only runs vision part of MLLM. The wrapper overrides `initialize_kv_cache_tensors` and `initialize_kv_cache` to return empty results, freeing up GPU memory for larger encoder cache storage.
 
-During execution, the wrapper executes encoding for scheduled multimodal inputs and inserts enocder output in encoder cache connector. Since no text generation happens here, it returns empty ModelRunnerOutput with additional transfered encoder outputs information in ModelRunnerOutput, this information is used in encoder scheduler to free the space in encoder cache manager.
+During execution, the wrapper executes encoding for scheduled multimodal inputs and inserts encoder output in encoder cache connector, due to nature of encode scheduler the `scheduled_output.scheduled_encoder_inputs` can contain already cached inputs or multiple same multimodal inputs, as cache is already present or going to be present we can just skip the encoding process for such `mm_inputs`.So we temporarily remove cached inputs and inputs such that their `mm_hash` already present somewhere in `scheduled_encoder_inputs`, after execution we return all removed entries back to `scheduler_output`. Motivation for sending all multimodal inputs to `model_runner` is provided in `EncoderScheduler` section.  
+
+Since no text generation happens here, it returns almost empty ModelRunnerOutput with additional transfered encoder outputs information in ModelRunnerOutput, this information is used in encoder scheduler to free the space in encoder cache manager.
 
 #### DisaggPrefillDecodeGPURunnerWrapper (Prefill/(Prefill+Decode) Instance)
 

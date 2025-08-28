@@ -112,8 +112,30 @@ class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
         scheduler. 
         """
         self._update_states(scheduler_output)
+        old_scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        new_scheduled_encoder_inputs = {}
+
+        # Erase cached inputs to execute mm encoder without repeated cache inputs
+        going_to_be_executed = set()
+        for req_id, mm_input_ids in old_scheduled_encoder_inputs.items():
+            mm_hashes = self.requests[req_id].mm_hashes
+            uncached_inputs = []
+            for input_id in mm_input_ids:
+                mm_hash = mm_hashes[input_id]
+                if ((not mm_hash in self.encoder_cache) 
+                    and (mm_hash not in going_to_be_executed)):
+                    uncached_inputs.append(input_id)
+                    going_to_be_executed.add(mm_hash)
+            new_scheduled_encoder_inputs[req_id] = uncached_inputs
+            
+        scheduler_output.scheduled_encoder_inputs = new_scheduled_encoder_inputs
+        
         self._execute_mm_encoder(scheduler_output)
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+
+        scheduler_output.scheduled_encoder_inputs = old_scheduled_encoder_inputs
+        del new_scheduled_encoder_inputs
+
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs 
 
         for req_id, mm_input_ids in scheduled_encoder_inputs.items():
             mm_hashes = self.requests[req_id].mm_hashes
