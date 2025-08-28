@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import queue
+import asyncio
 import threading
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Literal, Optional
 
 import torch
@@ -12,6 +11,7 @@ from vllm.config import EPDDisaggConfig, VllmConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 class ECConnectorTemplate(ABC):
     """
@@ -63,38 +63,27 @@ class ECConnectorTemplate(ABC):
         self.inter_instance_type: Literal["encode", "prefill",
                                           "prefill+decode"]
         self.encoder_cache: dict[str, dict[int, torch.Tensor]]
-        self.send_executors: ThreadPoolExecutor
-        self.recv_executors: ThreadPoolExecutor
 
         # Instance type and configs:
         self.epd_disagg_config = vllm_config.epd_disagg_config
         self.inter_instance_type = self.epd_disagg_config.instance_type
         self.intra_instance_type = intra_instance_type
 
-        # Initialize main transfer processing components:
-        self.send_tasks_queue: queue.Queue = queue.Queue()
-        self.send_executors = ThreadPoolExecutor(
-            max_workers=self.epd_disagg_config.connector_workers_num
-        )
-
+        # Initialize async components:
+        self.send_queue: asyncio.Queue = None  # Will be initialized in thread
+        self.recv_semaphore: asyncio.Semaphore = None  # Will be initialized in thread
+        
+        # Event loops for threads
+        self.send_loop: asyncio.AbstractEventLoop = None
+        self.recv_loop: asyncio.AbstractEventLoop = None
+        
         # Sanity check
         assert self.epd_disagg_config.connector_workers_num > 0
 
-        # Arif: max_workers num must match with limiting semaphore value
-        # otherwise receive busy loop will infinitely create tasks for
-        # the self.recv_executors  
-        self.recv_executors = ThreadPoolExecutor(
-            max_workers=self.epd_disagg_config.connector_workers_num + 1
-        )
-        self.send_worker = threading.Thread(target=self._send_event_loop)
-        self.recv_worker = threading.Thread(target=self._recv_event_loop)
+        self.send_worker = threading.Thread(target=self._run_send_loop)
+        self.recv_worker = threading.Thread(target=self._run_recv_loop)
         self.target_recv_callback = callback_mapping.get(
             (self.inter_instance_type, self.intra_instance_type))
-        
-        
-        self.limiting_semaphore = threading.Semaphore(
-            self.epd_disagg_config.connector_workers_num + 1
-        )
 
         # Used on model runner of encode instance:
         if (self.intra_instance_type == "model-runner"
@@ -106,12 +95,16 @@ class ECConnectorTemplate(ABC):
             self.transfered_ids_lock: threading.Lock = threading.Lock()
             self.transfered_ids = []
 
+        # Thread-safe futures for cross-thread communication
+        self._send_futures_lock = threading.Lock()
+        self._send_futures = []
+
         self.send_worker.start()
         self.recv_worker.start()
 
     @abstractmethod
-    def _send_prealloc_notification(self, request_id: str, input_id: int, 
-                                    successful: bool, mm_hash: str) -> None:
+    async def _send_prealloc_notification(self, request_id: str, input_id: int, 
+                                          successful: bool, mm_hash: str) -> None:
         """Send a pre-allocation completion notification.
 
         This method sends a notification to signal that the pre-allocation of
@@ -128,8 +121,8 @@ class ECConnectorTemplate(ABC):
         pass
 
     @abstractmethod
-    def _send_encoder_cache_metas(self, request_id: str, input_id: int,
-                                  num_encoder_tokens: int, mm_hash: str) -> None:
+    async def _send_encoder_cache_metas(self, request_id: str, input_id: int,
+                                        num_encoder_tokens: int, mm_hash: str) -> None:
         """Send the metadata of an encoder cache.
 
         This method is used to transfer the encoder cache's metadata.
@@ -143,7 +136,7 @@ class ECConnectorTemplate(ABC):
         pass
 
     @abstractmethod
-    def _send_encoder_cache(
+    async def _send_encoder_cache(
         self, request_id: str, input_id: int,
         encoder_cache: torch.Tensor, mm_hash: str
     ) -> None:
@@ -161,7 +154,7 @@ class ECConnectorTemplate(ABC):
         pass
 
     @abstractmethod
-    def _recv_prealloc_notification(
+    async def _recv_prealloc_notification(
             self, maybe_send_cache_callback: Callable[[str, int, bool, str],
                                                       None]) -> None:
         """Receive a pre-allocation completion notification.
@@ -183,7 +176,7 @@ class ECConnectorTemplate(ABC):
         pass
 
     @abstractmethod
-    def _recv_encoder_cache_metas(
+    async def _recv_encoder_cache_metas(
             self, preallocate_callback: Callable[[str, int, int, str],
                                                  None]) -> None:
         """Receives the encoder cache and calls preallocate callback
@@ -204,7 +197,7 @@ class ECConnectorTemplate(ABC):
         pass
 
     @abstractmethod
-    def _recv_encoder_cache(
+    async def _recv_encoder_cache(
         self, 
         injection_callback: Callable[[str, int, torch.Tensor, str],None]
     ) -> None:
@@ -289,24 +282,55 @@ class ECConnectorTemplate(ABC):
                 else:
                     self.cache_to_skip.add((request_id, input_id))
 
-    def _send_event_loop(self, ):
-        """Run receive event loop 
+    def _run_send_loop(self):
+        """Run the send event loop in a separate thread"""
+        self.send_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.send_loop)
+        self.send_queue = asyncio.Queue()
+        self.send_loop.run_until_complete(self._send_event_loop())
+
+    def _run_recv_loop(self):
+        """Run the receive event loop in a separate thread"""
+        self.recv_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.recv_loop)
+        self.recv_semaphore = asyncio.Semaphore(
+            self.epd_disagg_config.connector_workers_num + 1
+        )
+        self.recv_loop.run_until_complete(self._recv_event_loop())
+
+    async def _send_event_loop(self):
+        """Run send event loop 
         
         This method runs event loop for send tasks.
         """
         try:
+            tasks = set()
             while True:
-                callback, args = self.send_tasks_queue.get()
-                self.send_executors.submit(callback, *args)
+                # Process queued items
+                while not self.send_queue.empty():
+                    callback, args = await self.send_queue.get()
+                    task = asyncio.create_task(callback(*args))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                
+                # Check for cross-thread submissions
+                with self._send_futures_lock:
+                    for future, callback, args in self._send_futures:
+                        task = asyncio.create_task(callback(*args))
+                        future.set_result(task)
+                    self._send_futures.clear()
+                
+                # Small sleep to prevent busy waiting
+                await asyncio.sleep(0.001)
         except Exception as e:
             raise ConnectionError("Error during send event loop.") from e
 
-    def _limiting_wrapper(self, callback: Callable, arg: Callable):
+    async def _limiting_wrapper(self, callback: Callable, arg: Callable):
         """Wrapper function to limit the number of workers """
-        with self.limiting_semaphore:
-            callback(arg)
+        async with self.recv_semaphore:
+            await callback(arg)
 
-    def _recv_event_loop(self, ):
+    async def _recv_event_loop(self):
         """Run receive event loop 
         
         This method runs event loop for receive tasks and ensures that 
@@ -316,11 +340,18 @@ class ECConnectorTemplate(ABC):
         try:
             if self.target_recv_callback[0] is None:
                 return
+            
+            tasks = set()
             while True:
                 callback, arg = self.target_recv_callback
-                with self.limiting_semaphore:
-                    self.recv_executors.submit(self._limiting_wrapper,
-                                               callback, arg)
+                task = asyncio.create_task(
+                    self._limiting_wrapper(callback, arg)
+                )
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+                
+                # Small sleep to prevent overwhelming the system
+                await asyncio.sleep(0.001)
         except Exception as e:
             raise ConnectionError("Error during recv event loop") from e
 
@@ -337,9 +368,11 @@ class ECConnectorTemplate(ABC):
             successful: indicates whether we need to send the encoder cache or not
             mm_hash: hash of the mm input
         """
-        self.send_tasks_queue.put_nowait(
-            (self._send_prealloc_notification, 
-                (request_id, input_id, successful, mm_hash)))
+        self._schedule_async_task(
+            self.send_loop,
+            self._send_prealloc_notification,
+            (request_id, input_id, successful, mm_hash)
+        )
 
     def schedule_send_encoder_cache_metadata(self, request_id: str,
                                              input_id: int,
@@ -356,9 +389,11 @@ class ECConnectorTemplate(ABC):
             num_encoder_tokens: size of the encoder cache
             mm_hash: hash of the mm input
         """
-        self.send_tasks_queue.put_nowait(
-            (self._send_encoder_cache_metas, (request_id, input_id,
-                                              num_encoder_tokens, mm_hash)))
+        self._schedule_async_task(
+            self.send_loop,
+            self._send_encoder_cache_metas,
+            (request_id, input_id, num_encoder_tokens, mm_hash)
+        )
 
     def schedule_send_encoder_cache(
         self, request_id: str, input_id: int,
@@ -373,22 +408,37 @@ class ECConnectorTemplate(ABC):
             input_id: index of the mm input amoung request's mm inputs
             encoder_cache: encoder output 
         """
-        self.send_tasks_queue.put_nowait(
-            (self._finish_wrapper, (self._send_encoder_cache, request_id,
-                                    input_id, encoder_cache, mm_hash)))
+        self._schedule_async_task(
+            self.send_loop,
+            self._finish_wrapper,
+            (self._send_encoder_cache, request_id, input_id, encoder_cache, mm_hash)
+        )
 
-    def _finish_wrapper(
+    def _schedule_async_task(self, loop, callback, args):
+        """Schedule a task on a specific event loop from another thread"""
+        if loop is None:
+            # If loop not yet initialized, wait a bit
+            import time
+            time.sleep(0.1)
+            return self._schedule_async_task(loop, callback, args)
+        
+        future = asyncio.Future()
+        with self._send_futures_lock:
+            self._send_futures.append((future, callback, args))
+        return future
+
+    async def _finish_wrapper(
         self, callback: Callable, request_id: str, input_id: int,
         encoder_cache: torch.Tensor, mm_hash: str
     ):
         """
         Wrapper to fill the transfered_ids list
         """
-        callback(request_id, input_id, encoder_cache, mm_hash)
+        await callback(request_id, input_id, encoder_cache, mm_hash)
         with self.transfered_ids_lock:
             self.transfered_ids.append((request_id, input_id))
 
-    def get_transfered_ids(self, ):
+    def get_transfered_ids(self):
         """
         Method to get transfered ids
         """

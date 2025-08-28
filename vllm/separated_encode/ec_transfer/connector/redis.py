@@ -1,17 +1,20 @@
+
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Callable, Literal, Optional
 
 import msgpack_numpy
-import redis
+import redis.asyncio as redis
+import torch
 
 from vllm.config import VllmConfig
 from vllm.separated_encode.ec_transfer.connector.template import (
     ECConnectorTemplate)
 from vllm.logger import init_logger
-import torch
 
 logger = init_logger(__name__)
+
 
 class RedisECConnector(ECConnectorTemplate):
 
@@ -25,7 +28,9 @@ class RedisECConnector(ECConnectorTemplate):
                      [str, int, torch.Tensor, str], None]],
                  redis_host: str = "localhost",
                  redis_port: int = 6379):
-        self.redis_client = redis.StrictRedis(host=redis_host, port=redis_port)
+        self.redis_host = redis_host
+        self.redis_port = redis_port
+        self.redis_client = None
         self.rank = vllm_config.epd_disagg_config.epd_rank
         super().__init__(
             vllm_config,
@@ -34,6 +39,15 @@ class RedisECConnector(ECConnectorTemplate):
             preallocate_callback,
             injection_callback,
         )
+    
+    async def _get_redis_client(self):
+        """Get or create Redis client for the current event loop"""
+        if self.redis_client is None:
+            self.redis_client = await redis.Redis(
+                host=self.redis_host, 
+                port=self.redis_port
+            )
+        return self.redis_client
     
     def _get_request_ranks(self, request_id: str):
         """Extract E_RANK and PD_RANK from a proxy-formatted request ID.
@@ -49,8 +63,8 @@ class RedisECConnector(ECConnectorTemplate):
         result = request_id.split("|")
         return int(result[-2]), int(result[-1])
 
-    def _send_prealloc_notification(self, request_id: str, input_id: int, 
-                                    successful: bool, mm_hash: str) -> None:
+    async def _send_prealloc_notification(self, request_id: str, input_id: int, 
+                                          successful: bool, mm_hash: str) -> None:
         """
         Send pre-allocation notification from PD to E instance via Redis.
 
@@ -70,11 +84,13 @@ class RedisECConnector(ECConnectorTemplate):
             "mm_hash": mm_hash
         }
         rank = self._get_request_ranks(request_id)[0]
-        logger.debug(f"Sent prealloc notification -> {rank}, {request_id}, {successful}")        
-        self.redis_client.lpush(f"prealloc{rank}", 
-                                msgpack_numpy.packb(transfer_data))
+        logger.debug(f"Sent prealloc notification -> {rank}, {request_id}, {successful}")
+        
+        client = await self._get_redis_client()
+        await client.lpush(f"prealloc{rank}", 
+                          msgpack_numpy.packb(transfer_data))
 
-    def _send_encoder_cache_metas(
+    async def _send_encoder_cache_metas(
         self, request_id: str, input_id: int,
         num_encoder_tokens: int, mm_hash: str
     ) -> None:
@@ -98,10 +114,12 @@ class RedisECConnector(ECConnectorTemplate):
         }
         rank = self._get_request_ranks(request_id)[1]
         logger.debug(f"Sent encode cache metadata -> {rank}, {request_id}")
-        self.redis_client.lpush(f"cache_metas{rank}",
-                                msgpack_numpy.packb(transfer_data))
+        
+        client = await self._get_redis_client()
+        await client.lpush(f"cache_metas{rank}",
+                          msgpack_numpy.packb(transfer_data))
 
-    def _send_encoder_cache(
+    async def _send_encoder_cache(
         self, request_id: str, input_id: int,
         encoder_cache: torch.Tensor, mm_hash: str) -> None:
         """
@@ -125,9 +143,11 @@ class RedisECConnector(ECConnectorTemplate):
         })
         rank = self._get_request_ranks(request_id)[1]
         logger.debug(f"Sent encode cache -> {rank}, {request_id}")
-        self.redis_client.lpush(f"cache{rank}", transfer_data)
+        
+        client = await self._get_redis_client()
+        await client.lpush(f"cache{rank}", transfer_data)
 
-    def _recv_prealloc_notification(
+    async def _recv_prealloc_notification(
             self, maybe_send_cache_callback: Callable[[str, int, bool, str],
                                                       None]) -> None:
         """
@@ -140,7 +160,8 @@ class RedisECConnector(ECConnectorTemplate):
             maybe_send_cache_callback: Callback to determine whether to send
                 the encoder cache based on the pre-allocation result.
         """
-        transfered_data = self.redis_client.blpop(f"prealloc{self.rank}")[1]
+        client = await self._get_redis_client()
+        _, transfered_data = await client.blpop(f"prealloc{self.rank}")
         transfered_data = msgpack_numpy.unpackb(transfered_data, raw=False)
         request_id, input_id, successful, mm_hash = (
             transfered_data["request_id"],
@@ -151,7 +172,7 @@ class RedisECConnector(ECConnectorTemplate):
         logger.debug(f"Received prealloc notif -> {self.rank}, {request_id}")
         maybe_send_cache_callback(request_id, input_id, successful, mm_hash)
 
-    def _recv_encoder_cache_metas(
+    async def _recv_encoder_cache_metas(
             self, preallocate_callback: Callable[[str, int, int, str],
                                                  None]) -> None:
         """
@@ -164,7 +185,8 @@ class RedisECConnector(ECConnectorTemplate):
             preallocate_callback: Scheduler callback to pre-allocate space
                 for the incoming encoder cache.
         """
-        transfered_data = self.redis_client.blpop(f"cache_metas{self.rank}")[1]
+        client = await self._get_redis_client()
+        _, transfered_data = await client.blpop(f"cache_metas{self.rank}")
         transfered_data = msgpack_numpy.unpackb(transfered_data, raw=False)
         request_id, input_id, num_encoder_tokens, mm_hash = (
             transfered_data["request_id"], 
@@ -175,7 +197,7 @@ class RedisECConnector(ECConnectorTemplate):
         logger.debug(f"Received encoder metadata -> {self.rank}, {request_id}")
         preallocate_callback(request_id, input_id, num_encoder_tokens, mm_hash)
 
-    def _recv_encoder_cache(
+    async def _recv_encoder_cache(
         self, 
         injection_callback: Callable[[str, int, torch.Tensor, str],None]
     ) -> None:
@@ -189,7 +211,8 @@ class RedisECConnector(ECConnectorTemplate):
             injection_callback: Model runner callback to inject the encoder
                 cache into the cache dictionary.
         """
-        transfered_data = self.redis_client.blpop(f"cache{self.rank}")[1]
+        client = await self._get_redis_client()
+        _, transfered_data = await client.blpop(f"cache{self.rank}")
         transfered_data = msgpack_numpy.unpackb(transfered_data, raw=False)
         request_id, input_id, encoder_cache, mm_hash = (
             transfered_data["request_id"], 
