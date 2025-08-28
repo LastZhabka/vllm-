@@ -10,20 +10,13 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 import argparse
 import logging
+import random
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Global configuration
-ENCODE_SERVER_URL = "http://localhost:19534"
-PREFILL_DECODE_SERVER_URL = "http://localhost:19535"
-E_RANK = 0
-PD_RANK = 1
-
-# Create persistent clients
 encode_session: Optional[aiohttp.ClientSession] = None
 decode_session: Optional[aiohttp.ClientSession] = None
 
@@ -59,14 +52,18 @@ def has_mm_input(request_data: dict):
 
 async def forward_streaming_request(
     request_data: dict,
-    request_id: str
+    request_id: str,
+    e_server_url: str,
+    pd_server_url: str,
 ) -> AsyncIterator[str]:
+    
+
     headers = {"x-request-id": request_id}
     # Skip request to encoder instance if we don't have mm input
     if has_mm_input(request_data):
         task1 = asyncio.create_task(
             encode_session.post(
-                f"{ENCODE_SERVER_URL}/v1/chat/completions",
+                f"{e_server_url}/v1/chat/completions",
                 json=request_data,
                 headers=headers
             )
@@ -87,7 +84,7 @@ async def forward_streaming_request(
 
     try:
         async with decode_session.post(
-            f"{PREFILL_DECODE_SERVER_URL}/v1/chat/completions",
+            f"{pd_server_url}/v1/chat/completions",
             json=request_data,
             headers=headers
         ) as response:
@@ -101,7 +98,9 @@ async def forward_streaming_request(
 
 async def forward_non_streaming_request(
     request_data: dict,
-    request_id: str
+    request_id: str,
+    e_server_url: str,
+    pd_server_url: str,
 ) -> dict:
     headers = {"x-request-id": request_id}
     # Skip request to encoder instance if we don't have mm input
@@ -109,7 +108,7 @@ async def forward_non_streaming_request(
         # Start request to encode server
         task1 = asyncio.create_task(
             encode_session.post(
-                f"{ENCODE_SERVER_URL}/v1/chat/completions",
+                f"{e_server_url}/v1/chat/completions",
                 json=request_data,
                 headers=headers
             )
@@ -132,7 +131,7 @@ async def forward_non_streaming_request(
     try:
         # Make request to decode server
         async with decode_session.post(
-            f"{PREFILL_DECODE_SERVER_URL}/v1/chat/completions",
+            f"{pd_server_url}/v1/chat/completions",
             json=request_data,
             headers=headers
         ) as response2:
@@ -147,19 +146,31 @@ async def forward_non_streaming_request(
 async def chat_completions(request: Request):
     """Handle chat completion requests."""
     try:
+        e_instance = random.randint(0, len(app.state.e_urls) - 1)
+        pd_instance = random.randint(0, len(app.state.pd_urls) - 1)
+        e_rank = app.state.e_ranks[e_instance]
+        pd_rank = app.state.pd_ranks[pd_instance]
+        e_server_url = app.state.e_urls[e_instance]
+        pd_server_url = app.state.pd_urls[pd_instance]
+
+
+        logger.info(f"Matched: E-{e_rank}, PD-{pd_rank}")
+
         request_data = await request.json()
         request_id = request.headers.get("x-request-id")
         if not request_id:
             request_id = str(uuid.uuid4())
-        request_id = f"{request_id}|{E_RANK}|{PD_RANK}"
+        request_id = f"{request_id}|{e_rank}|{pd_rank}"
         is_streaming = request_data.get("stream", False)
         if is_streaming:
             return StreamingResponse(
-                forward_streaming_request(request_data, request_id),
+                forward_streaming_request(
+                    request_data, request_id, e_server_url, pd_server_url),
                 media_type="text/event-stream"
             )
         else:
-            result = await forward_non_streaming_request(request_data, request_id)
+            result = await forward_non_streaming_request(
+                request_data, request_id, e_server_url, pd_server_url)
             return JSONResponse(content=result)
     except Exception as e:
         logger.error(f"Error processing request: {e}")
@@ -168,7 +179,7 @@ async def chat_completions(request: Request):
 @app.get("/v1/models")
 async def list_models():
     try:
-        async with decode_session.get(f"{PREFILL_DECODE_SERVER_URL}/v1/models") as response:
+        async with decode_session.get(f"{app.state.pd_urls[0]}/v1/models") as response:
             response.raise_for_status()
             return await response.json()
     except Exception as e:
@@ -181,17 +192,19 @@ async def health_check():
     try:
         async def check_encode():
             try:
-                async with encode_session.get(f"{ENCODE_SERVER_URL}/health") as response:
-                    response.raise_for_status()
-                    return True
+                for e_url in app.state.e_urls:
+                    async with encode_session.get(f"{e_url}/health") as response:
+                        response.raise_for_status()
+                return True
             except Exception:
                 return False
         
         async def check_decode():
             try:
-                async with decode_session.get(f"{PREFILL_DECODE_SERVER_URL}/health") as response:
-                    response.raise_for_status()
-                    return True
+                for pd_url in app.state.pd_urls:
+                    async with encode_session.get(f"{pd_url}/health") as response:
+                        response.raise_for_status()
+                return True
             except Exception:
                 return False
         
@@ -201,8 +214,8 @@ async def health_check():
         
         health_status = {
             "proxy": "healthy",
-            "encode_server": "healthy" if encode_healthy is True else "unhealthy",
-            "prefill_decode_server": "healthy" if decode_healthy is True else "unhealthy"
+            "encode_servers": "healthy" if encode_healthy is True else "unhealthy",
+            "prefill_decode_servers": "healthy" if decode_healthy is True else "unhealthy"
         }
         
         if not (encode_healthy is True and decode_healthy is True):
@@ -221,23 +234,32 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="API Proxy for distributed vLLM servers")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Proxy host")
     parser.add_argument("--port", type=int, default=8000, help="Proxy port")
-    parser.add_argument("--encode-server-url", type=str, required=True,
-                       help="URL of the encode server (e.g., http://localhost:8001)")
-    parser.add_argument("--prefill-decode-server-url", type=str, required=True,
-                       help="URL of the prefill/decode server (e.g., http://localhost:8002)")
-    parser.add_argument("--e-rank", type=int, default=0, help="Encode server rank")
-    parser.add_argument("--pd-rank", type=int, default=1, help="Prefill/decode server rank")
+
+    parser.add_argument("--encode-servers-urls", type=str, required=True,
+                       help="URLs of the encode server in comma separated format"
+                            "(e.g., \"http://localhost:8001,http://localhost:8002\")")
+    
+    parser.add_argument("--encode-servers-ranks", type=str, required=True,
+                       help="Respective EPD ranks for encode servers in comma-separated format"
+                            "(e.g., \"0,1\")")
+    
+    parser.add_argument("--prefill-decode-servers-urls", type=str, required=True,
+                       help="URLs of the prefill/decode servers in comma separated format"
+                            "(e.g., \"http://localhost:8003,http://localhost:8004\")")
+    
+    parser.add_argument("--prefill-decode-servers-ranks", type=str, required=True,
+                       help="Respective EPD ranks for encode servers in comma-separated format"
+                            "(e.g., \"2,3\")")
     
     args = parser.parse_args()
-    
-    ENCODE_SERVER_URL = args.encode_server_url
-    PREFILL_DECODE_SERVER_URL = args.prefill_decode_server_url
-    E_RANK = args.e_rank
-    PD_RANK = args.pd_rank
+    app.state.e_urls = args.encode_servers_urls.split(",")
+    app.state.pd_urls = args.prefill_decode_servers_urls.split(",")
+    app.state.e_ranks = args.encode_servers_ranks.split(",")
+    app.state.pd_ranks = args.prefill_decode_servers_ranks.split(",")
     
     logger.info(f"Starting API proxy on {args.host}:{args.port} with 1 worker")
-    logger.info(f"Encode server: {ENCODE_SERVER_URL} (rank {E_RANK})")
-    logger.info(f"Prefill/Decode server: {PREFILL_DECODE_SERVER_URL} (rank {PD_RANK})")
+    logger.info(f"Encode servers: {app.state.e_urls} (respective ranks {app.state.e_ranks})")
+    logger.info(f"Prefill/Decode server: {app.state.pd_urls} (respective ranks {app.state.pd_ranks})")
 
     uvicorn.run(
         app,

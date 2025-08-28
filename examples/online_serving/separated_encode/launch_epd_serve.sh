@@ -14,7 +14,7 @@ LOG_PATH=$LOG_PATH
 ENCODE_PORT=19534
 PREFILL_DECODE_PORT=19535
 PROXY_PORT=10001
-GPU="7"
+GPU="5"
 START_TIME=$(date +"%Y%m%d_%H%M%S")
 
 redis-server &
@@ -41,12 +41,12 @@ CUDA_VISIBLE_DEVICES="$GPU" vllm serve "$MODEL" \
 
 wait_for_server $PREFILL_DECODE_PORT
 
-python examples/online_serving/separated_encode/proxy/proxy1e1pd_aiohttp.py \
+python examples/online_serving/separated_encode/proxy/proxy_aiohttp.py \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
-    --encode-server-url "http://localhost:$ENCODE_PORT" \
-    --prefill-decode-server-url "http://localhost:$PREFILL_DECODE_PORT" \
-    --e-rank 0 \
-    --pd-rank 1 &
+    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
+    --prefill-decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
+    --encode-servers-ranks "0" \
+    --prefill-decode-servers-ranks "1" &
 
 wait_for_server $PROXY_PORT
