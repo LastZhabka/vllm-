@@ -135,7 +135,9 @@ class EncoderScheduler(SchedulerInterface):
             
             num_tokens_to_schedule = 0
             can_allocate_all = True
-            encoder_inputs_to_schedule = []         
+            encoder_inputs_to_schedule = []
+            is_cached = []
+            
             for input_id, pos_info in enumerate(mm_positions):
                 num_encoder_tokens = pos_info.length
                 if (
@@ -144,6 +146,13 @@ class EncoderScheduler(SchedulerInterface):
                         request, input_id
                     )
                 ):
+                    # On Encoder instance we need to send all inputs to model runner
+                    # because we need to pass (req_id, input_id) to model runner's
+                    # ec connector, to send the cache to PD instance, so we will add
+                    # it to the scheduled encoder inputs without changing budget
+                    # and in model runner we will just skip all calculated values
+                    encoder_inputs_to_schedule.append(input_id)
+                    is_cached.append(True)
                     continue
                 if not self.encoder_cache_manager.can_allocate(
                     request=request, 
@@ -156,6 +165,7 @@ class EncoderScheduler(SchedulerInterface):
                 num_tokens_to_schedule += num_encoder_tokens
                 new_encoder_compute_budget -= num_encoder_tokens
                 encoder_inputs_to_schedule.append(input_id)
+                is_cached.append(False)
             
             # NOTE: Note that all updates from loop above are not applied 
             # if we can't allocate all mm_inputs    
@@ -179,10 +189,11 @@ class EncoderScheduler(SchedulerInterface):
             scheduled_encoder_inputs[req_id] = encoder_inputs_to_schedule
             
             # Allocate the encoder cache.
-            for input_id in encoder_inputs_to_schedule:
+            for input_id, is_cached_input in zip(encoder_inputs_to_schedule, is_cached):
                 mm_hash = request.mm_hashes[input_id]
                 num_encoder_tokens = request.get_num_encoder_tokens(input_id)
-                self.encoder_cache_manager.allocate(request, input_id)                
+                if not is_cached_input:
+                    self.encoder_cache_manager.allocate(request, input_id)               
                 self.ec_connector.schedule_send_encoder_cache_metadata(
                     req_id,
                     input_id,
@@ -216,7 +227,6 @@ class EncoderScheduler(SchedulerInterface):
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
-        logger.debug(f"Request (8) ")    
 
         self.finished_req_ids = set()
         return scheduler_output
